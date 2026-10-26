@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin:0; padding:0; overflow:hidden; background:#111418; }
+  #app { width:100%; height:460px; position:relative; }
+  canvas { display:block; }
+  #hint { position:absolute; left:10px; bottom:8px; color:#9fb0c3;
+          font:12px system-ui, sans-serif; }
+  #sel { position:absolute; right:10px; top:8px; color:#ffd166;
+         font:bold 13px system-ui, sans-serif; }
+</style>
+<script type="importmap">
+{"imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+</head>
+<body>
+<div id="app"><div id="sel"></div><div id="hint">drag to rotate - scroll to zoom - click an orange marker to edit that hole/slot</div></div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+
+function sendValue(v) {
+  window.parent.postMessage({isStreamlitMessage: true, type: "streamlit:setComponentValue", value: v}, "*");
+}
+function ready() {
+  window.parent.postMessage({isStreamlitMessage: true, type: "streamlit:componentReady", apiVersion: 1}, "*");
+  window.parent.postMessage({isStreamlitMessage: true, type: "streamlit:setFrameHeight", height: 460}, "*");
+}
+
+let renderer, scene, camera, controls, markers = [], currentKey = "";
+
+function build(args) {
+  const key = args.stl_b64.slice(0, 64) + "|" + args.selected + "|" + args.markers.length;
+  const app = document.getElementById('app');
+  if (renderer) { app.querySelectorAll('canvas').forEach(c => c.remove()); markers = []; }
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x111418);
+  camera = new THREE.PerspectiveCamera(45, app.clientWidth / 460, 0.1, 5000);
+  camera.up.set(0, 0, 1);
+  renderer = new THREE.WebGLRenderer({antialias: true});
+  renderer.setSize(app.clientWidth, 460);
+  app.appendChild(renderer.domElement);
+  controls = new OrbitControls(camera, renderer.domElement);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+  const d1 = new THREE.DirectionalLight(0xffffff, 1.6); d1.position.set(120, -80, 200); scene.add(d1);
+  const d2 = new THREE.DirectionalLight(0x88aaff, 0.5); d2.position.set(-100, 100, 60); scene.add(d2);
+
+  const bytes = Uint8Array.from(atob(args.stl_b64), c => c.charCodeAt(0));
+  const geo = new STLLoader().parse(bytes.buffer);
+  geo.computeBoundingBox();
+  const bb = geo.boundingBox, cx = (bb.max.x + bb.min.x) / 2, cy = (bb.max.y + bb.min.y) / 2;
+  const size = Math.max(bb.max.x - bb.min.x, bb.max.y - bb.min.y, 10);
+  const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({color: 0xb8c4d4, metalness: 0.35, roughness: 0.45}));
+  scene.add(mesh);
+  const grid = new THREE.GridHelper(size * 2.2, 20, 0x2c3644, 0x1d2530);
+  grid.rotation.x = Math.PI / 2; grid.position.set(cx, cy, -0.05); scene.add(grid);
+
+  for (const m of args.markers) {
+    const sel = m.id === args.selected;
+    const s = new THREE.Mesh(
+      new THREE.SphereGeometry(Math.max(1.6, size * 0.022), 20, 14),
+      new THREE.MeshBasicMaterial({color: sel ? 0xff4444 : 0xff9f1c}));
+    s.position.set(m.x, m.y, (args.thickness || 3) + 1.2);
+    s.userData.id = m.id;
+    scene.add(s); markers.push(s);
+  }
+  document.getElementById('sel').textContent = args.selected ? ("selected: " + args.selected) : "";
+  camera.position.set(cx, cy - size * 1.15, size * 0.95);
+  controls.target.set(cx, cy, 0);
+  controls.update();
+
+  const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
+  renderer.domElement.addEventListener('click', (e) => {
+    const r = renderer.domElement.getBoundingClientRect();
+    mouse.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+    mouse.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+    ray.setFromCamera(mouse, camera);
+    const hit = ray.intersectObjects(markers)[0];
+    if (hit) sendValue(hit.object.userData.id);
+  });
+  renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+  currentKey = key;
+}
+
+window.addEventListener('message', (e) => {
+  if (e.data.type === 'streamlit:render') build(e.data.args);
+});
+ready();
+</script>
+</body>
+</html>

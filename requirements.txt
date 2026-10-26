@@ -1,0 +1,8 @@
+opencv-contrib-python>=4.8
+numpy
+pillow
+pydantic>=2
+streamlit>=1.40
+build123d>=0.9
+matplotlib
+requests
