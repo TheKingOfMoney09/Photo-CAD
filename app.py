@@ -30,6 +30,7 @@ ss.setdefault("spec_json", None)
 ss.setdefault("selected", None)
 ss.setdefault("views_png", {})
 ss.setdefault("photo_names", {})
+ss.setdefault("pending", {})   # role -> raw bytes staged for processing
 ss.setdefault("log", [])
 
 
@@ -168,25 +169,44 @@ with st.sidebar:
         st.caption("• " + line)
 
 
-def _ingest(upload, role: str, thresh: int) -> bool:
+def _stage(upload, role: str) -> None:
+    """Stage a photo; processing happens only on the Measure button."""
     if upload is None:
-        return False
-    h = hashlib.md5(upload.getvalue()).hexdigest()
-    if ss.get(f"hash_{role}") == h:
-        return False
-    ss[f"hash_{role}"] = h
-    img = cv2.imdecode(np.frombuffer(upload.getvalue(), np.uint8),
-                       cv2.IMREAD_COLOR)
-    process_photo(img, upload.name, thresh, role)
-    return True
+        return
+    data = upload.getvalue()
+    if ss.pending.get(role) != data:
+        ss.pending[role] = data
+        ss.photo_names[role] = upload.name
 
 
-_changed = False
-_changed |= _ingest(top_file, "top", thresh)
-_changed |= _ingest(side_file, "side", thresh)
-_changed |= _ingest(front_file, "front", thresh)
-if _changed:
-    st.rerun()
+_stage(top_file, "top")
+_stage(side_file, "side")
+_stage(front_file, "front")
+
+# Measure button lives in its own sidebar block AFTER staging, so it
+# appears on the same run the photo is attached.
+with st.sidebar:
+    st.markdown("---")
+    st.caption("**Step 1** — attach photos above (they stage here, nothing runs yet).")
+    staged = [r for r in ("top", "side", "front") if ss.pending.get(r)]
+    if staged:
+        st.caption("Staged: " + ", ".join(
+            f"{r} ({len(ss.pending[r]) // 1024} KB)" for r in staged))
+        if st.button("🔨 Measure → build CAD", type="primary", use_container_width=True,
+                     help="Top becomes the master spec; side/front fuse into it."):
+            with st.spinner("Measuring… (rectify → segment → measure → fuse)"):
+                for role in staged:
+                    img = cv2.imdecode(
+                        np.frombuffer(ss.pending[role], np.uint8), cv2.IMREAD_COLOR)
+                    process_photo(img, ss.photo_names.get(role, f"{role}.jpg"),
+                                  thresh, role)
+                    del ss.pending[role]
+            st.rerun()
+        if st.button("Clear staged photos"):
+            ss.pending = {}
+            st.rerun()
+    else:
+        st.caption("No photos staged yet — attach top/side/front above.")
 
 spec = get_spec()
 
