@@ -1,53 +1,66 @@
-"""Synthetic end-to-end test.
-
-Renders a fake bench photo: calibration card + a known 80x40 plate with
-4 holes and 1 slot, warped by a perspective transform. Runs the real
-measurement pipeline and prints measured vs ground-truth errors.
-Run: .venv\\Scripts\\python.exe scripts\\demo_synthetic.py
-"""
+"""Multi-view regression: top + side + bracket-side synthetic photos."""
 import sys
 from pathlib import Path
 
-import cv2
-import numpy as np
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from partforge import cad
+from partforge.fusion import fuse
 from partforge.measure import measure_photo
-from partforge.synthetic import GT, make_synthetic_photo as make_photo
+from partforge.synthetic import GT, make_synthetic_bracket_side, \
+    make_synthetic_photo, make_synthetic_side
+
+
+def check(name: str, cond: bool, detail: str = "") -> bool:
+    print(("PASS " if cond else "FAIL ") + name + (f" — {detail}" if detail else ""))
+    return cond
 
 
 def main() -> int:
-    photo = make_photo()
-    cv2.imwrite("tmp_synthetic_photo.jpg", photo)
-    spec, rect, ppm, info = measure_photo(photo)
-    print("info:", info)
-    if spec is None:
-        print("FAIL: no spec measured")
-        return 1
-    cv2.imwrite("tmp_synthetic_rectified.jpg", rect)
-    print(f"outline: {spec.width_mm:.2f} x {spec.height_mm:.2f} mm "
-          f"(GT {GT['w']} x {GT['h']}) -> err "
-          f"{abs(spec.width_mm-GT['w']):.2f} / {abs(spec.height_mm-GT['h']):.2f} mm")
     ok = True
-    for gx, gy, gd in GT["holes"]:
-        best = min(spec.holes, key=lambda h: abs(h.x - gx) + abs(h.y - gy),
-                   default=None)
-        if best is None:
-            print(f"hole GT ({gx},{gy},d{gd}): MISSING"); ok = False; continue
-        err = (abs(best.x - gx), abs(best.y - gy), abs(best.d - gd))
-        print(f"hole GT ({gx},{gy},d{gd}): measured ({best.x:.2f},{best.y:.2f},"
-              f"d{best.d:.2f}) err x/y/d = {err[0]:.2f}/{err[1]:.2f}/{err[2]:.2f} mm")
-        ok = ok and max(err) < 1.0
-    print(f"slots measured: {[(s.cx, s.cy, s.length, s.width) for s in spec.slots]} "
-          f"(GT {GT['slot']})")
-    from partforge import cad
-    spec.thickness_mm = 3.0
-    stl = cad.export_bytes(spec, "stl")
-    step = cad.export_bytes(spec, "step")
-    print(f"export: STL {len(stl)} bytes, STEP {len(step)} bytes")
-    print("questions:", [q.id for q in spec.questions()])
-    print("RESULT:", "PASS" if ok else "CHECK errors above")
+    top, _, _, _ = measure_photo(make_synthetic_photo())
+    ok &= check("top measured", top is not None and len(top.holes) == 4,
+                top.summary() if top else "none")
+
+    side, _, _, _ = measure_photo(make_synthetic_side("W"))
+    ok &= check("side measured", side is not None,
+                f"{side.width_mm:.1f}x{side.height_mm:.1f}" if side else "none")
+    fuse(top, {"side": side})
+    th = top.thickness_mm
+    ok &= check("thickness vote", th is not None and abs(th - GT["t"]) <= 0.8,
+                f"vote {th} vs GT {GT['t']}")
+    ok &= check("side matched long edge",
+                "long side" in str(top.view_reports.get("side", "")),
+                str(top.view_reports.get("side", ""))[:100])
+
+    front, _, _, _ = measure_photo(make_synthetic_side("H"))
+    fuse(top, {"side": side, "front": front})
+    th2 = top.thickness_mm
+    agree = len(top.thickness_votes) == 2
+    ok &= check("two votes agree", agree and top.thickness_confidence == 1.0,
+                f"votes {top.thickness_votes} -> {th2}")
+
+    br_side, _, _, _ = measure_photo(make_synthetic_bracket_side())
+    tb = top.model_copy(deep=True)
+    tb.type, tb.thickness_mm, tb.bend = "plate", 3.0, None
+    fuse(tb, {"side": br_side})
+    bend = tb.bend
+    ok &= check("bracket proposed", tb.type == "bracket" and bend is not None,
+                str(tb.view_reports.get("side", ""))[:110])
+    if bend is not None:
+        ok &= check("bend angle ~90", abs(bend.angle_deg - 90) <= 8,
+                    f"{bend.angle_deg:.1f} deg at {bend.position_mm:.1f} mm")
+        s_ = cad.build_solid(tb)
+        ok &= check("bracket CAD builds", s_.volume > 0,
+                    f"vol {s_.volume:.0f}")
+        stl = cad.export_bytes(tb, "stl")
+        ok &= check("bracket STL non-empty", len(stl) > 1000, str(len(stl)))
+
+    stl = cad.export_bytes(top, "stl")
+    step = cad.export_bytes(top, "step")
+    ok &= check("STL/STEP export", len(stl) > 1000 and len(step) > 1000,
+                f"{len(stl)}/{len(step)} bytes")
+    print("RESULT:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
 

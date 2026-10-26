@@ -43,6 +43,10 @@ def parse_edit_text(text: str, spec) -> dict | None:
     m = re.search(r"(?:height|tall|long)[^0-9]*([0-9]+(?:[.,][0-9]+)?)", t)
     if m:
         return {"field": "height_mm", "value": _num(m.group(1))}
+    # bend: 'bend 90' / 'bend at 30 is 90'
+    m = re.search(r"bend[^0-9]*([0-9]+(?:[.,][0-9]+)?)", t)
+    if m:
+        return {"field": "bend.angle_deg", "value": _num(m.group(1))}
     return None
 
 
@@ -56,6 +60,13 @@ def apply_edit(spec, edit: dict) -> str:
             if h.id == hid:
                 h.d = v
                 h.confidence = 1.0
+    elif f.startswith("bend."):
+        if spec.bend is None:
+            from .spec import Bend
+            spec.type = "bracket"
+            spec.bend = Bend(position_mm=spec.width_mm / 2)
+        spec.bend.angle_deg = v
+        spec.bend.confidence = 1.0
     elif f == "width_mm":
         spec.rescale_outline(v, spec.height_mm)
     elif f == "height_mm":

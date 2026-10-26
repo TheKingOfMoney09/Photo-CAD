@@ -14,9 +14,11 @@ import streamlit as st
 
 from partforge import cad, meta_api
 from partforge.card import render_card
+from partforge.fusion import fuse
 from partforge.measure import annotate, measure_photo
-from partforge.spec import Hole, PartSpec, Slot, rectangle_spec
-from partforge.synthetic import make_synthetic_photo
+from partforge.spec import Bend, Hole, PartSpec, Slot, rectangle_spec
+from partforge.synthetic import make_synthetic_bracket_side, \
+    make_synthetic_photo, make_synthetic_side
 from partforge.viewer import part_viewer
 from partforge.voice_edit import apply_edit, parse_edit_text
 
@@ -26,8 +28,8 @@ st.set_page_config(page_title="PartForge", layout="wide", page_icon="🔩")
 ss = st.session_state
 ss.setdefault("spec_json", None)
 ss.setdefault("selected", None)
-ss.setdefault("rect_png", None)
-ss.setdefault("photo_name", None)
+ss.setdefault("views_png", {})
+ss.setdefault("photo_names", {})
 ss.setdefault("log", [])
 
 
@@ -39,11 +41,15 @@ def get_spec() -> PartSpec | None:
     return PartSpec(**ss.spec_json) if ss.spec_json else None
 
 
+def clear_inputs(prefixes=("hole_", "slot_", "ans_", "dim_", "view_")):
+    for k in list(ss.keys()):
+        if k.startswith(prefixes):
+            del ss[k]
+
+
 def set_spec(spec: PartSpec) -> None:
     ss.spec_json = json.loads(spec.model_dump_json())
-    for k in list(ss.keys()):
-        if k.startswith(("hole_", "slot_", "ans_", "dim_")):
-            del ss[k]
+    clear_inputs()
 
 
 def save(spec: PartSpec) -> None:
@@ -58,20 +64,34 @@ def build_exports(spec_json: str, tol: float):
             cad.top_view_png(spec))
 
 
-def process_photo(img_bgr: np.ndarray, name: str, thresh: int) -> None:
+def process_photo(img_bgr: np.ndarray, name: str, thresh: int,
+                  role: str = "top") -> None:
+    """role: top | side | front. Top replaces the master; sides fuse into it."""
     spec, rect, ppm, info = measure_photo(img_bgr, thresh=thresh)
     if spec is None:
-        st.error(f"Could not measure '{name}': {info.get('error', 'unknown')} "
+        st.error(f"Could not measure '{name}' ({role}): "
+                 f"{info.get('error', 'unknown')} "
                  f"(markers found: {info.get('card_markers')}). "
-                 "Check all 4 card markers are visible, or use demo/manual mode.")
+                 "Need all 4 card markers visible.")
         return
-    set_spec(spec)
-    ss.selected = None
     annotated = annotate(rect, spec, ppm)
     ok, buf = cv2.imencode(".png", annotated)
-    ss.rect_png = buf.tobytes() if ok else None
-    ss.photo_name = name
-    log(f"Measured {spec.summary()} from {name}")
+    ss.views_png[role] = buf.tobytes() if ok else None
+    ss.photo_names[role] = name
+    if role == "top":
+        set_spec(spec)
+        ss.selected = None
+        log(f"Top: {spec.summary()}")
+    else:
+        master = get_spec()
+        if master is None:
+            set_spec(spec)  # side-only edge case: at least show something
+            log(f"{role}: no top yet — showing it as master for now")
+            return
+        reports = fuse(master, {role: spec})
+        clear_inputs(("ans_",))  # questions changed; keep dimension edits
+        save(master)
+        log(f"{role}: {reports.get(role, 'fused')}")
 
 
 def cb_hole(hid: str, field: str):
@@ -109,10 +129,12 @@ with st.sidebar:
     st.caption("Meta APIs: " + ", ".join(
         f"{k}={'on' if v else 'off'}" for k, v in cfg.items()))
 
-    top_file = st.file_uploader("Top photo (part on calibration card)",
-                                type=["jpg", "jpeg", "png"])
-    side_file = st.file_uploader("Side photo (optional, for bends)",
-                                 type=["jpg", "jpeg", "png"])
+    top_file = st.file_uploader("Top view — part lying flat on the card",
+                                type=["jpg", "jpeg", "png"], key="up_top")
+    side_file = st.file_uploader("Side view — standing on its long edge",
+                                 type=["jpg", "jpeg", "png"], key="up_side")
+    front_file = st.file_uploader("Front view — standing on short edge (or other leg)",
+                                  type=["jpg", "jpeg", "png"], key="up_front")
     thresh = st.slider("Segmentation threshold (fallback)", 120, 250, 210,
                        help="Lower if the part is missed, higher if card text is picked up.")
     tol = st.slider("Print hole tolerance (mm)", 0.0, 0.4, 0.2, 0.05,
@@ -120,7 +142,13 @@ with st.sidebar:
 
     c1, c2 = st.columns(2)
     if c1.button("▶ Demo part", use_container_width=True):
-        process_photo(make_synthetic_photo(), "synthetic demo", thresh)
+        process_photo(make_synthetic_photo(), "synthetic demo top", thresh, "top")
+        process_photo(make_synthetic_side("W"), "synthetic demo side", thresh, "side")
+        process_photo(make_synthetic_side("H"), "synthetic demo front", thresh, "front")
+        st.rerun()
+    if c1.button("▶ Demo bracket", use_container_width=True):
+        process_photo(make_synthetic_photo(), "synthetic plate top", thresh, "top")
+        process_photo(make_synthetic_bracket_side(), "synthetic L side", thresh, "side")
         st.rerun()
     card_png = cv2.imencode(".png", render_card())[1].tobytes()
     c2.download_button("⬇ Print card", card_png, "partforge_card.png",
@@ -133,23 +161,32 @@ with st.sidebar:
         bt = st.number_input("Thickness mm", 0.5, 50.0, 3.0)
         if st.button("Create blank plate"):
             set_spec(rectangle_spec(bw, bh, bt))
-            ss.rect_png = None
+            ss.views_png = {}
             st.rerun()
-
-    if side_file is not None:
-        st.image(side_file, caption="Side photo (bend support coming next)")
 
     for line in ss.log:
         st.caption("• " + line)
 
-if top_file is not None:
-    data = top_file.getvalue()
-    h = hashlib.md5(data).hexdigest()
-    if ss.get("last_hash") != h:
-        ss.last_hash = h
-        img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
-        process_photo(img, top_file.name, thresh)
-        st.rerun()
+
+def _ingest(upload, role: str, thresh: int) -> bool:
+    if upload is None:
+        return False
+    h = hashlib.md5(upload.getvalue()).hexdigest()
+    if ss.get(f"hash_{role}") == h:
+        return False
+    ss[f"hash_{role}"] = h
+    img = cv2.imdecode(np.frombuffer(upload.getvalue(), np.uint8),
+                       cv2.IMREAD_COLOR)
+    process_photo(img, upload.name, thresh, role)
+    return True
+
+
+_changed = False
+_changed |= _ingest(top_file, "top", thresh)
+_changed |= _ingest(side_file, "side", thresh)
+_changed |= _ingest(front_file, "front", thresh)
+if _changed:
+    st.rerun()
 
 spec = get_spec()
 
@@ -157,12 +194,14 @@ spec = get_spec()
 if spec is None:
     st.header("Photograph the part. Get a printable part back.")
     st.markdown(
-        "1. Print the calibration card (sidebar), place the broken part on it.\n"
-        "2. Upload a top photo. PartForge measures it in millimetres.\n"
-        "3. Click a hole/edge in the 3D viewer, fix any dimension, export **STL** or **STEP**.\n\n"
+        "1. Print the calibration card (sidebar), place the part on it.\n"
+        "2. **Top**: part lying flat → outline + holes + slots.\n"
+        "3. **Side / front**: part standing on edge → thickness vote; "
+        "an L-profile proposes a bracket bend.\n"
+        "4. Click a marker in the 3D viewer, fix dimensions, export **STL** or **STEP**.\n\n"
         "Scope: flat plates and single-bend brackets with holes/slots. "
-        "Thickness is confirmed with calipers — never guessed from a photo.\n\n"
-        "No part handy? Hit **▶ Demo part** in the sidebar.")
+        "Thickness comes from side views or your caliper — never from the top photo.\n\n"
+        "No part handy? Hit **▶ Demo part** or **▶ Demo bracket** in the sidebar.")
     st.stop()
 
 st.subheader(f"Measured part — {spec.summary()}")
@@ -182,9 +221,14 @@ with left:
         ss.selected = clicked
         st.rerun()
     st.image(diagram_png, caption="Dimension diagram — numbers match the panel on the right")
-    if ss.rect_png:
-        with st.expander("Measured photo (rectified, annotated)"):
-            st.image(ss.rect_png)
+    for role in ("top", "side", "front"):
+        if ss.views_png.get(role):
+            with st.expander(f"{role.capitalize()} view (rectified, annotated) — "
+                             f"{ss.photo_names.get(role, '')}"):
+                st.image(ss.views_png[role])
+                rep = (get_spec().view_reports or {}).get(role)
+                if rep:
+                    st.caption(rep)
 
 with right:
     # ----- asks
@@ -218,7 +262,11 @@ with right:
     d1, d2, d3 = st.columns(3)
     d1.metric("Width", f"{spec.width_mm:.1f} mm")
     d2.metric("Height", f"{spec.height_mm:.1f} mm")
-    d3.metric("Thickness", f"{spec.thickness_mm or '—'} mm")
+    tv = spec.thickness_votes
+    tlabel = (f"{spec.thickness_mm:.1f} mm"
+              + (f" (votes {', '.join(f'{v:.1f}' for v in tv)})" if tv else "")
+              if spec.thickness_mm is not None else "—")
+    d3.metric("Thickness", tlabel)
 
     nw = d1.number_input("Set width", 1.0, 1000.0, float(round(spec.width_mm, 1)), key="resize_w")
     nh = d2.number_input("Set height", 1.0, 1000.0, float(round(spec.height_mm, 1)), key="resize_h")
@@ -261,6 +309,45 @@ with right:
                            on_change=cb_slot, args=(s.id, "length"))
             e.number_input("wid", 0.5, 100.0, float(s.width), 0.1, key=f"slot_{s.id}_width",
                            on_change=cb_slot, args=(s.id, "width"))
+
+    # ----- bracket
+    st.markdown("#### Bracket")
+    is_bracket = st.checkbox("This part has a bend", value=(spec.type == "bracket"),
+                             key="view_is_bracket")
+    if is_bracket and spec.type != "bracket":
+        spec.type = "bracket"
+        if spec.bend is None:
+            spec.bend = Bend(position_mm=round(spec.width_mm / 2, 1))
+        save(spec); st.rerun()
+    if not is_bracket and spec.type != "plate":
+        spec.type = "plate"
+        save(spec); st.rerun()
+    if spec.type == "bracket":
+        b = spec.bend or Bend(position_mm=round(spec.width_mm / 2, 1))
+        spec.bend = b
+        sel_b = ss.selected == "bend"
+        if st.button(f"{'🔴' if sel_b else '🟣'} Bend — {b.angle_deg:.0f}° at {b.position_mm:.1f} mm",
+                     key="pick_bend", use_container_width=True):
+            ss.selected = "bend"; st.rerun()
+        if sel_b or True:
+            p1, p2, p3 = st.columns(3)
+            pos = p1.number_input("position mm", 0.5, 2000.0, float(b.position_mm), 0.5,
+                                  key="dim_bend_pos")
+            ang = p2.number_input("angle °", 15.0, 175.0, float(b.angle_deg), 1.0,
+                                  key="dim_bend_ang")
+            ax = p3.selectbox("bend line ∥", ["y", "x"],
+                              index=0 if b.axis == "y" else 1, key="dim_bend_ax")
+            if st.button("Apply bend", key="dim_bend_apply"):
+                b.position_mm, b.angle_deg, b.axis = float(pos), float(ang), ax
+                try:
+                    cad.build_solid(spec)
+                    b.confidence = 1.0
+                    save(spec); st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+        note = getattr(cad.build_solid(spec), "_partforge_note", "")
+        if note and "1 on folded" not in note and "0 on folded" not in note:
+            st.caption(note)
 
     ac1, ac2 = st.columns(2)
     if ac1.button("＋ Add hole"):

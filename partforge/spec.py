@@ -35,6 +35,8 @@ class Bend(BaseModel):
     position_mm: float  # distance from one end along the flat pattern
     angle_deg: float = 90.0
     radius_mm: float = 2.0
+    axis: str = "y"  # bend line runs parallel to this spec axis
+    confidence: float = 0.6
 
 
 class Question(BaseModel):
@@ -53,6 +55,9 @@ STANDARD_HOLES = [2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 7.0, 8.0, 10.0]
 class PartSpec(BaseModel):
     type: Literal["plate", "bracket"] = "plate"
     thickness_mm: Optional[float] = None
+    thickness_votes: list[float] = Field(default_factory=list)  # measured votes from side/front views
+    thickness_confidence: float = 0.0  # 0..1; photo can never make this 1.0
+    view_reports: dict[str, str] = Field(default_factory=dict)  # per-view fusion notes
     outline_mm: list[list[float]] = Field(default_factory=list)  # polygon, mm
     holes: list[Hole] = Field(default_factory=list)
     slots: list[Slot] = Field(default_factory=list)
@@ -97,9 +102,23 @@ class PartSpec(BaseModel):
         if self.thickness_mm is None:
             qs.append(Question(
                 id="thickness", field="thickness_mm",
-                text="Thickness: I cannot measure this from the top photo. "
-                     "What does the caliper say?",
+                text="Thickness: no side or front view yet. "
+                     "Photograph the part standing on edge, or caliper it?",
                 kind="number", suggested=3.0))
+        elif self.thickness_votes and self.thickness_confidence < 1.0:
+            votes = ", ".join(f"{v:.1f}" for v in self.thickness_votes)
+            qs.append(Question(
+                id="thickness_confirm", field="thickness_mm",
+                text=f"Thickness votes disagree ({votes} mm). Caliper wins — "
+                     f"sides on my current average {self.thickness_mm:.1f} mm?",
+                kind="number", suggested=self.thickness_mm))
+        if self.type == "bracket" and self.bend is not None and \
+                self.bend.confidence < 1.0:
+            qs.append(Question(
+                id="bend_angle_confirm", field="bend.angle_deg",
+                text=f"Side view suggests a {self.bend.angle_deg:.0f}° bend at "
+                     f"{self.bend.position_mm:.1f} mm. Confirm the angle?",
+                kind="number", suggested=self.bend.angle_deg))
         for hole in self.holes:
             near = [s for s in STANDARD_HOLES if abs(s - hole.d) <= 0.45]
             ambiguous = len(near) >= 1 and abs(near[0] - hole.d) > 0.15
@@ -136,6 +155,7 @@ class PartSpec(BaseModel):
         f = question.field
         if f == "thickness_mm":
             self.thickness_mm = value
+            self.thickness_confidence = 1.0  # user (caliper) outranks photo votes
         elif f.startswith("hole:"):
             hid = f.split(":")[1].split(".")[0]
             for hole in self.holes:
@@ -153,11 +173,15 @@ class PartSpec(BaseModel):
                 self.bend = Bend(position_mm=self.width_mm / 2, angle_deg=value)
             else:
                 self.bend.angle_deg = value
+                self.bend.confidence = 1.0
 
     def summary(self) -> str:
-        return (f"{self.type} {self.width_mm:.1f}x{self.height_mm:.1f} mm, "
-                f"thickness {self.thickness_mm}, {len(self.holes)} holes, "
-                f"{len(self.slots)} slots")
+        t = f"{self.thickness_mm:.1f}" if self.thickness_mm is not None else "—"
+        parts = [f"{self.type} {self.width_mm:.1f}x{self.height_mm:.1f}x{t} mm",
+                 f"{len(self.holes)} holes", f"{len(self.slots)} slots"]
+        if self.type == "bracket" and self.bend is not None:
+            parts.append(f"bend {self.bend.angle_deg:.0f}° at {self.bend.position_mm:.1f}")
+        return ", ".join(parts)
 
 
 def rectangle_spec(w: float, h: float, thickness: Optional[float] = 3.0) -> PartSpec:

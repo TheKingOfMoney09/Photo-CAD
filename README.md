@@ -20,17 +20,22 @@ geometry — rather than a dead triangle mesh.
 
 Pipeline (measured, never hallucinated):
 
-1. **Capture** — top (+ optional side) photo of the part on the printed calibration card.
+1. **Capture** — top + side + front photos, each on the printed calibration card.
 2. **Segment** — click-select the broken instance with SAM 3.1 (OpenCV card fallback runs now).
-3. **Measure** — deterministic OpenCV: outline, hole centres/diameters, slots, in millimetres.
-4. **Ask** — PartForge asks only the ambiguous dimensions (thickness, uncertain holes), via
-   Muse Spark reasoning; typed/voice correction loop ("hole 2 is 5, not 4").
-5. **Build** — spec → parametric build123d model, regenerated live on every edit.
-6. **Verify** — CAD overlay on the rectified photo + caliper error table (coming).
-7. **Print** — export STL (print) or STEP (edit in Fusion/Onshape).
+3. **Measure** — deterministic OpenCV per view: top gives outline/holes/slots;
+   side/front vote on thickness; an L-profile proposes a bracket bend.
+4. **Fuse** — thickness votes average (disagreement asks you, caliper wins);
+   mismatched poses are reported, never silently merged.
+5. **Ask** — PartForge asks only the ambiguous dimensions (confirm thickness,
+   uncertain holes, bend angle), via Muse Spark reasoning; typed/voice
+   correction loop ("hole 2 is 5, not 4", "bend 90").
+6. **Build** — spec → parametric build123d model (plate, or folded single-bend
+   bracket), regenerated live on every edit.
+7. **Verify** — CAD overlay on the rectified photo + caliper error table (coming).
+8. **Print** — export STL (print) or STEP (edit in Fusion/Onshape).
 
-Scope: flat plates + single-bend brackets with holes/slots. Thickness is confirmed
-with calipers, never guessed. No gears, threads, or freeform shapes.
+Scope: flat plates + single-bend brackets with holes/slots. No gears, threads,
+or freeform shapes.
 
 ## Tech
 
@@ -55,17 +60,19 @@ Then: hit **▶ Demo part** in the sidebar, or print the card
 
 ```
 .
-├── app.py                  # Streamlit UI: upload -> 3D viewer -> edit -> export
+├── app.py                  # Streamlit UI: upload 3 views -> 3D viewer -> edit -> export
 ├── partforge/
-│   ├── spec.py             # PartSpec: outline/holes/slots/bend + questions
+│   ├── spec.py             # PartSpec: outline/holes/slots/bend + thickness votes + questions
 │   ├── card.py             # printable calibration card + ArUco rectification
 │   ├── measure.py          # deterministic mm measurement from a photo
-│   ├── cad.py              # spec -> build123d solid -> STL/STEP, dimension diagram
-│   ├── viewer.py           # clickable Three.js viewer (hole markers select dims)
+│   ├── fusion.py           # multi-view fusion: thickness votes + bend proposals
+│   ├── synthetic.py        # synthetic top/side/bracket fixtures with known truth
+│   ├── cad.py              # spec -> build123d solid (plate or folded bracket) -> STL/STEP
+│   ├── viewer.py           # clickable Three.js viewer (holes/slots purple bend marker)
 │   ├── meta_api.py         # Meta API wrappers (SAM/Muse/Voice, fallback-safe)
-│   └── voice_edit.py       # 'hole 2 is 5, not 4' -> structured edit
+│   └── voice_edit.py       # 'hole 2 is 5, not 4' / 'bend 90' -> structured edit
 ├── scripts/
-│   └── demo_synthetic.py   # regression test on a known-truth fake photo
+│   └── demo_synthetic.py   # multi-view regression on known-truth fake photos
 └── requirements.txt
 ```
 

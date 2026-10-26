@@ -2,15 +2,21 @@
 
 Spec is the source of truth; this module only turns numbers into geometry.
 A print-tolerance is applied to holes/slots at export time for FDM fit.
+
+Bracket support is deliberately narrow: one straight bend, outline treated
+as its flat-pattern rectangle. Top-view holes cut on the leg they fall on;
+features on the folded leg are kept in the spec but not cut (flagged in UI).
 """
 from __future__ import annotations
 
 import io
+import math
 import os
 import tempfile
 
 from build123d import (
-    Circle, Polygon, Pos, Rot, SlotOverall, export_step, export_stl, extrude,
+    Axis, Box, Circle, Polygon, Pos, Rot, SlotOverall,
+    export_step, export_stl, extrude,
 )
 
 from .spec import PartSpec
@@ -18,6 +24,8 @@ from .spec import PartSpec
 
 def build_solid(spec: PartSpec, hole_tolerance_mm: float = 0.0):
     t = spec.thickness_mm or 3.0
+    if spec.type == "bracket" and spec.bend is not None:
+        return _build_bracket(spec, t, hole_tolerance_mm)
     pts = [(p[0], p[1]) for p in spec.outline_mm]
     if len(pts) < 3:
         raise ValueError("Outline needs at least 3 points")
@@ -30,6 +38,65 @@ def build_solid(spec: PartSpec, hole_tolerance_mm: float = 0.0):
             width=slot.length + hole_tolerance_mm,
             height=slot.width + hole_tolerance_mm)
     return extrude(profile, amount=t)
+
+
+def _build_bracket(spec: PartSpec, t: float, tol: float):
+    xs = [p[0] for p in spec.outline_mm]
+    ys = [p[1] for p in spec.outline_mm]
+    minx, miny = min(xs), min(ys)
+    W, H = max(xs) - minx, max(ys) - miny
+    axis, pos = spec.bend.axis, spec.bend.position_mm
+    if axis == "y":
+        fixed, moving, leg_h = pos, W - pos, H
+        if fixed <= 0.5 or moving <= 0.5:
+            raise ValueError(
+                f"Bend at {pos:.1f} mm leaves a degenerate leg "
+                f"({fixed:.1f}/{moving:.1f} mm) — fix the position.")
+        fixed_box = Box(fixed, leg_h, t)
+        moving_box = Box(moving, leg_h, t).translate((pos, 0, 0))
+        bend_line = Axis((pos, 0, 0), (0, 1, 0))
+        fixed_span = (0.0, pos)
+    else:
+        fixed, moving, leg_h = pos, H - pos, W
+        if fixed <= 0.5 or moving <= 0.5:
+            raise ValueError(
+                f"Bend at {pos:.1f} mm leaves a degenerate leg "
+                f"({fixed:.1f}/{moving:.1f} mm) — fix the position.")
+        fixed_box = Box(leg_h, fixed, t)
+        moving_box = Box(leg_h, moving, t).translate((0, pos, 0))
+        bend_line = Axis((0, pos, 0), (1, 0, 0))
+        fixed_span = (0.0, pos)
+    fold = math.radians(180.0 - spec.bend.angle_deg)  # away from flat
+    base = fixed_box.fuse(moving_box.rotate(bend_line, math.degrees(fold)))
+
+    def on_fixed(x: float, y: float) -> bool:
+        return (0 <= x <= fixed) if axis == "y" else (0 <= y <= fixed)
+
+    cut, kept = 0, 0
+    for hole in spec.holes:
+        hx, hy = hole.x - minx, hole.y - miny
+        if not on_fixed(hx, hy):
+            kept += 1
+            continue
+        punch = extrude(
+            Pos(hx, hy) * Circle(radius=(hole.d + tol) / 2),
+            amount=t * 3).translate((0, 0, -t))
+        base -= punch
+        cut += 1
+    for slot in spec.slots:
+        sx_, sy_ = slot.cx - minx, slot.cy - miny
+        if not on_fixed(sx_, sy_):
+            kept += 1
+            continue
+        punch = extrude(
+            Pos(sx_, sy_) * Rot(0, 0, slot.angle_deg) * SlotOverall(
+                width=slot.length + tol, height=slot.width + tol),
+            amount=t * 3).translate((0, 0, -t))
+        base -= punch
+        cut += 1
+    base._partforge_note = (f"{cut} features cut on flat leg, "
+                            f"{kept} on folded leg kept in spec only")
+    return base.translate((-minx, -miny, 0))
 
 
 def export_bytes(spec: PartSpec, fmt: str, hole_tolerance_mm: float = 0.2) -> bytes:
@@ -59,6 +126,17 @@ def top_view_png(spec: PartSpec, selected: str | None = None) -> bytes:
     fig, ax = plt.subplots(figsize=(7, 5), dpi=110)
     poly = list(spec.outline_mm) + [spec.outline_mm[0]]
     ax.plot([p[0] for p in poly], [p[1] for p in poly], "k-", lw=2)
+    if spec.type == "bracket" and spec.bend is not None:
+        b = spec.bend
+        if b.axis == "y":
+            ax.axvline(b.position_mm, color="tab:purple", ls="--", lw=1.5)
+            ax.text(b.position_mm, spec.height_mm + 4,
+                    f"bend {b.angle_deg:.0f}°", color="tab:purple",
+                    ha="center", fontsize=9)
+        else:
+            ax.axhline(b.position_mm, color="tab:purple", ls="--", lw=1.5)
+            ax.text(-6, b.position_mm, f"bend {b.angle_deg:.0f}°",
+                    color="tab:purple", va="center", fontsize=9)
     for h in spec.holes:
         sel = selected == h.id
         color = "red" if sel else "tab:red"
@@ -80,8 +158,10 @@ def top_view_png(spec: PartSpec, selected: str | None = None) -> bytes:
     ax.set_aspect("equal")
     ax.set_xlabel(f"width {spec.width_mm:.1f} mm")
     ax.set_ylabel(f"height {spec.height_mm:.1f} mm")
-    ax.set_title(f"{spec.width_mm:.1f} x {spec.height_mm:.1f} x "
-                 f"{spec.thickness_mm or '?'} mm")
+    title = f"{spec.width_mm:.1f} x {spec.height_mm:.1f} x {spec.thickness_mm or '?'} mm"
+    if spec.type == "bracket" and spec.bend is not None:
+        title += f" + bend {spec.bend.angle_deg:.0f}°"
+    ax.set_title(title)
     ax.grid(True, alpha=0.25)
     fig.tight_layout()
     out = io.BytesIO()

@@ -19,7 +19,7 @@
 </script>
 </head>
 <body>
-<div id="app"><div id="sel"></div><div id="hint">drag to rotate - scroll to zoom - click an orange marker to edit that hole/slot</div></div>
+<div id="app"><div id="sel"></div><div id="hint">drag to rotate - scroll to zoom - click an orange marker to edit that hole/slot, purple = bend</div></div>
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -64,9 +64,10 @@ function build(args) {
 
   for (const m of args.markers) {
     const sel = m.id === args.selected;
+    const isBend = m.id === 'bend';
     const s = new THREE.Mesh(
       new THREE.SphereGeometry(Math.max(1.6, size * 0.022), 20, 14),
-      new THREE.MeshBasicMaterial({color: sel ? 0xff4444 : 0xff9f1c}));
+      new THREE.MeshBasicMaterial({color: sel ? 0xff4444 : (isBend ? 0xb366ff : 0xff9f1c)}));
     s.position.set(m.x, m.y, (args.thickness || 3) + 1.2);
     s.userData.id = m.id;
     scene.add(s); markers.push(s);
