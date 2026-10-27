@@ -32,7 +32,6 @@ ss.setdefault("photo_names", {})
 ss.setdefault("pending", {})   # role -> raw bytes staged for processing
 ss.setdefault("pf_hist", [])   # undo stack of spec_json
 ss.setdefault("log", [])
-ss.setdefault("pf_step", 0)
 ss.setdefault("pf_tol", 0.2)
 
 
@@ -124,84 +123,94 @@ def cb_thickness():
     save(spec)
 
 
-# ---------------------------------------------------------------- sidebar
-with st.sidebar:
-    st.title("🔩 Capture")
-    st.caption("Attach one photo per pose. **Top is required** — side/front add "
-               "thickness and bend detection. Nothing runs until you press Measure.")
-    uploads = {}
-    for role, label in (("top", "Top — part lying flat (required)"),
-                        ("side", "Side — on long edge (thickness)"),
-                        ("front", "Front — on short edge (thickness)")):
-        uploads[role] = st.file_uploader(label, type=["jpg", "jpeg", "png"],
-                                         key=f"up_{role}")
-        if ss.pending.get(role):
-            st.caption(f"✓ {role} staged ({len(ss.pending[role]) // 1024} KB)")
-    for role, up in uploads.items():
-        if up is not None:
-            data = up.getvalue()
-            if ss.pending.get(role) != data:
-                ss.pending[role] = data
-                ss.photo_names[role] = up.name
+# ---------------------------------------------------------------- Capture panel
+# No sidebar: Capture lives as a collapsible panel under the menu bar,
+# Photoshop-panels style. Top is required; side/front add thickness + bends.
+cap_open = ss.get("cap_open", True)
+cap_label = "➖ ① Capture — photos in" if cap_open else "➕ ① Capture — photos in"
+if st.button(cap_label, use_container_width=True, key="cap_toggle"):
+    ss.cap_open = not cap_open
+    st.rerun()
+
+if cap_open:
+    st.markdown("<div class='pf-cap'>", unsafe_allow_html=True)
+    cu1, cu2, cu3 = st.columns(3)
+    with cu1:
+        up_top = st.file_uploader("Top — lying flat (required)",
+                                  type=["jpg", "jpeg", "png"], key="up_top")
+    with cu2:
+        up_side = st.file_uploader("Side — on long edge (thickness)",
+                                   type=["jpg", "jpeg", "png"], key="up_side")
+    with cu3:
+        up_front = st.file_uploader("Front — on short edge (thickness)",
+                                    type=["jpg", "jpeg", "png"], key="up_front")
+    for role, up in (("top", up_top), ("side", up_side), ("front", up_front)):
+        if up is not None and ss.pending.get(role) != up.getvalue():
+            ss.pending[role] = up.getvalue()
+            ss.photo_names[role] = up.name
     staged = [r for r in ("top", "side", "front") if ss.pending.get(r)]
-    thresh = st.slider("Segmentation threshold (fallback)", 120, 250, 210,
-                       help="Lower if the part is missed, higher if card text is picked up.")
-    tol = st.slider("Print hole tolerance (mm)", 0.0, 0.4, 0.2, 0.05,
-                    help="Extra clearance so printed holes fit real bolts.")
-    ss.pf_tol = tol
-    st.markdown("---")
-    if staged:
-        if st.button("🔨 Measure → build CAD", type="primary",
-                     use_container_width=True,
-                     help="Top becomes the master spec; side/front fuse into it."):
-            with st.spinner("Measuring… (rectify → segment → measure → fuse)"):
-                for role in staged:
-                    img = cv2.imdecode(
-                        np.frombuffer(ss.pending[role], np.uint8), cv2.IMREAD_COLOR)
-                    process_photo(img, ss.photo_names.get(role, f"{role}.jpg"),
-                                  thresh, role)
-                    del ss.pending[role]
-            st.rerun()
-        if st.button("Clear staged photos"):
-            ss.pending = {}
-            st.rerun()
-    else:
-        st.caption("No photos staged yet — attach top/side/front above.")
-
-    st.markdown("---")
-    st.caption("No part handy? Try a synthetic demo:")
-    d1, d2 = st.columns(2)
-    if d1.button("▶ Plate", use_container_width=True):
-        process_photo(make_synthetic_photo(), "synthetic demo top", thresh, "top")
-        process_photo(make_synthetic_side("W"), "synthetic demo side", thresh, "side")
-        process_photo(make_synthetic_side("H"), "synthetic demo front", thresh, "front")
-        st.rerun()
-    if d2.button("▶ Bracket", use_container_width=True):
-        process_photo(make_synthetic_photo(), "synthetic plate top", thresh, "top")
-        process_photo(make_synthetic_bracket_side(), "synthetic L side", thresh, "side")
-        st.rerun()
-
-    with st.expander("Start from a blank plate"):
-        bw = st.number_input("Width mm", 5.0, 500.0, 80.0)
-        bh = st.number_input("Height mm", 5.0, 500.0, 40.0)
-        bt = st.number_input("Thickness mm", 0.5, 50.0, 3.0)
-        if st.button("Create blank plate"):
-            set_spec(rectangle_spec(bw, bh, bt))
-            ss.views_png = {}
-            st.rerun()
-
-    for line in ss.log:
-        st.caption("• " + line)
+    co1, co2, co3 = st.columns([1.4, 1.1, 1.5])
+    with co1:
+        thresh = st.slider("Segmentation threshold", 120, 250, 210,
+                           help="Lower if the part is missed, higher if card text is picked up.")
+    with co2:
+        tol = st.slider("Print hole tolerance (mm)", 0.0, 0.4, 0.2, 0.05,
+                        help="Extra clearance so printed holes fit real bolts.")
+        ss.pf_tol = tol
+    with co3:
+        st.write("")
+        st.write("")
+        if staged:
+            if st.button("🔨 Measure → build CAD", type="primary",
+                         use_container_width=True):
+                with st.spinner("Measuring… (rectify → segment → measure → fuse)"):
+                    if "top" not in staged:
+                        st.error("Top view is required — attach the flat-lay photo.")
+                    else:
+                        for role in staged:
+                            img = cv2.imdecode(
+                                np.frombuffer(ss.pending[role], np.uint8),
+                                cv2.IMREAD_COLOR)
+                            process_photo(img, ss.photo_names.get(role, f"{role}.jpg"),
+                                          thresh, role)
+                            del ss.pending[role]
+                        st.rerun()
+            if st.button("Clear staged photos", use_container_width=True):
+                ss.pending = {}
+                st.rerun()
+        else:
+            st.caption("Attach photos above, or try a synthetic demo:")
+            dd1, dd2, dd3 = st.columns(3)
+            if dd1.button("▶ Plate", use_container_width=True, key="demo_plate"):
+                process_photo(make_synthetic_photo(), "synthetic top", thresh, "top")
+                process_photo(make_synthetic_side("W"), "synthetic side", thresh, "side")
+                process_photo(make_synthetic_side("H"), "synthetic front", thresh, "front")
+                st.rerun()
+            if dd2.button("▶ Bracket", use_container_width=True, key="demo_bracket"):
+                process_photo(make_synthetic_photo(), "synthetic top", thresh, "top")
+                process_photo(make_synthetic_bracket_side(), "synthetic L", thresh, "side")
+                st.rerun()
+            if dd3.button("▢ Blank plate", use_container_width=True, key="demo_blank"):
+                set_spec(rectangle_spec(80, 40, 3.0))
+                ss.views_png = {}
+                log("Blank 80x40x3 plate created — edit freely")
+                st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+else:
+    thresh = 210
+    tol = ss.get("pf_tol", 0.2)
 
 spec = get_spec()
+doc = ss.photo_names.get("top") or "untitled part"
+if spec is not None and not ss.views_png:
+    doc += " (manual)"
 
 # ---------------------------------------------------------------- menu + steps
-step_idx = 0 if spec is None else (2 if ss.get("pf_go_export") else 1)
-ui.menubar(step_idx, spec is not None)
+step_idx = 0 if spec is None else 1
+ui.menubar(doc, step_idx, spec is not None)
 
 # ---------------------------------------------------------------- main
 if spec is None:
-    ss.pf_step = 0
     st.markdown(
         """<div class="pf-hero">
         <h1>🔩 PartForge</h1>
@@ -209,7 +218,7 @@ if spec is None:
         Geometry is <b>measured</b> from the photos — never hallucinated.</p>
         <p>① Print the calibration card (<span class="pf-kbd">File</span> →
         <span class="pf-kbd">Print calibration card</span>) →
-        ② attach <b>top / side / front</b> photos in the Capture panel →
+        ② attach <b>top / side / front</b> photos in the ① Capture panel →
         ③ <span class="pf-kbd">🔨 Measure → build CAD</span></p>
         </div>""", unsafe_allow_html=True)
     st.stop()
@@ -217,10 +226,12 @@ if spec is None:
 st.subheader(f"Measured part — {spec.summary()}")
 spec_json = json.dumps(ss.spec_json, sort_keys=True)
 stl_bytes, step_bytes, diagram_png = build_exports(spec_json, tol)
-ss.dl_stl, ss.dl_step = stl_bytes, step_bytes  # File menu downloads need these
+ss.dl_stl, ss.dl_step = stl_bytes, step_bytes  # Export menu downloads need these
 
-tab_review, tab_export = st.tabs(["🔍 Review — dimensions & questions",
-                                  "⬇ Export — STL / STEP"])
+if ss.get("pf_go_export"):
+    ss.pf_go_export = False
+tab_review, tab_export = st.tabs(["🔍 ② Review — dimensions & questions",
+                                  "⬇ ③ Export — STL / STEP"])
 
 with tab_review:
     left, right = st.columns([1.55, 1.0])
