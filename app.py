@@ -123,9 +123,18 @@ def cb_thickness():
     save(spec)
 
 
+# ---------------------------------------------------------------- menu + steps FIRST
+# Photoshop-style: title bar is the first thing on the page, menus touching.
+spec = get_spec()
+doc = ss.photo_names.get("top") or "untitled part"
+if spec is not None and not ss.views_png:
+    doc += " (manual)"
+step_idx = 0 if spec is None else 1
+ui.menubar(doc, step_idx, spec is not None)
+
 # ---------------------------------------------------------------- Capture panel
-# No sidebar: Capture lives as a collapsible panel under the menu bar,
-# Photoshop-panels style. Top is required; side/front add thickness + bends.
+# Collapsible Photoshop-panel style. Collapses itself after a successful
+# Measure so the menus stay near the top of the viewport.
 cap_open = ss.get("cap_open", True)
 cap_label = "➖ ① Capture — photos in" if cap_open else "➕ ① Capture — photos in"
 if st.button(cap_label, use_container_width=True, key="cap_toggle"):
@@ -174,6 +183,7 @@ if cap_open:
                             process_photo(img, ss.photo_names.get(role, f"{role}.jpg"),
                                           thresh, role)
                             del ss.pending[role]
+                        ss.cap_open = False  # collapse capture: menus on top
                         st.rerun()
             if st.button("Clear staged photos", use_container_width=True):
                 ss.pending = {}
@@ -185,29 +195,23 @@ if cap_open:
                 process_photo(make_synthetic_photo(), "synthetic top", thresh, "top")
                 process_photo(make_synthetic_side("W"), "synthetic side", thresh, "side")
                 process_photo(make_synthetic_side("H"), "synthetic front", thresh, "front")
+                ss.cap_open = False
                 st.rerun()
             if dd2.button("▶ Bracket", use_container_width=True, key="demo_bracket"):
                 process_photo(make_synthetic_photo(), "synthetic top", thresh, "top")
                 process_photo(make_synthetic_bracket_side(), "synthetic L", thresh, "side")
+                ss.cap_open = False
                 st.rerun()
             if dd3.button("▢ Blank plate", use_container_width=True, key="demo_blank"):
                 set_spec(rectangle_spec(80, 40, 3.0))
                 ss.views_png = {}
+                ss.cap_open = False
                 log("Blank 80x40x3 plate created — edit freely")
                 st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 else:
     thresh = 210
     tol = ss.get("pf_tol", 0.2)
-
-spec = get_spec()
-doc = ss.photo_names.get("top") or "untitled part"
-if spec is not None and not ss.views_png:
-    doc += " (manual)"
-
-# ---------------------------------------------------------------- menu + steps
-step_idx = 0 if spec is None else 1
-ui.menubar(doc, step_idx, spec is not None)
 
 # ---------------------------------------------------------------- main
 if spec is None:

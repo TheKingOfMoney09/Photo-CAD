@@ -29,20 +29,27 @@ div[data-testid="stStatusWidget"] { display: none !important; }
 section[data-testid="stSidebar"] { background:#11151c; }
 .block-container { padding-top: 0.6rem !important; padding-bottom: 48px; max-width: 100% !important; }
 
-/* ---- app title bar ---- */
-.pf-titlebar { display:flex; align-items:center; gap:0; background:#1e1e1e;
-  border:1px solid #333; border-radius:8px 8px 0 0; padding:2px 6px;
+/* ---- app title bar: ONE strip, menus touching ---- */
+.pf-titlebar { display:flex; align-items:stretch; gap:0; background:#1e1e1e;
+  border:1px solid #333; border-radius:8px 8px 0 0; padding:0 6px 0 0;
   margin-bottom:0; border-bottom:none; }
-.pf-brand { font-weight:700; font-size:14px; color:#f5f5f4; margin-right:4px;
+.pf-brand { font-weight:700; font-size:14px; color:#f5f5f4; margin-right:0;
   display:flex; align-items:center; gap:7px; white-space:nowrap;
-  padding:6px 8px 6px 4px; }
+  padding:6px 10px 6px 10px; border-right:1px solid #333; }
 .pf-brand .dot { width:11px; height:11px; border-radius:3px;
   background:linear-gradient(135deg,#f59e0b,#ef4444); display:inline-block; }
 .pf-doctitle { flex:1; text-align:center; font-size:12.5px; color:#9aa4b2;
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding:0 12px; }
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding:0 12px;
+  align-self:center; }
+/* popover menu buttons: flush against each other like Photoshop menus */
+div[data-testid="stPopover"] { margin:0 !important; padding:0 !important; }
 div[data-testid="stPopover"] > button { background:transparent !important;
-  border:none !important; color:#d6dbe2 !important; font-size:13px !important;
-  padding:6px 10px !important; border-radius:0 !important; }
+  border:none !important; border-radius:0 !important; margin:0 !important;
+  color:#d6dbe2 !important; font-size:13px !important;
+  padding:8px 12px !important; }
+/* kill the gaps between the menu buttons (title bar only) */
+.pf-menus div[data-testid="column"] { padding:0 1px 0 0 !important; min-width:0 !important; }
+.pf-menus div[data-testid="stHorizontalBlock"] { gap:0 !important; }
 div[data-testid="stPopover"] > button:hover { background:#3a3a3a !important;
   color:#fff !important; }
 div[data-testid="stPopover"] button[kind="primary"] { background:#f59e0b !important;
@@ -102,14 +109,16 @@ def menubar(doc_title: str, step_idx: int, has_spec: bool):
     Export popover on the right holds STL/STEP downloads.
     """
     st.markdown(THEME_CSS, unsafe_allow_html=True)
-    bar_l, bar_c, bar_r = st.columns([5.2, 3.0, 1.1])
-    with bar_l:
-        c0, c1, c2, c3, c4, c5 = st.columns([1.35, 0.62, 0.62, 0.62, 0.72, 0.62])
-        with c0:
+    st.markdown("<div class='pf-menus'>", unsafe_allow_html=True)
+    bar = st.columns([5.2, 3.0, 1.1])
+    with bar[0]:
+        # one row, zero gaps: brand | File Edit View Window Help, all touching
+        row = st.columns([1.35, 0.62, 0.62, 0.62, 0.72, 0.62], gap="small")
+        with row[0]:
             st.markdown(
                 "<div class='pf-brand'><span class='dot'></span>PartForge</div>",
                 unsafe_allow_html=True)
-        with c1:
+        with row[1]:
             with st.popover("File"):
                 if st.button("📷 New from photos",
                              use_container_width=True, key="m_new"):
@@ -126,7 +135,7 @@ def menubar(doc_title: str, step_idx: int, has_spec: bool):
                               "show_rect", "show_diagram"):
                         st.session_state.pop(k, None)
                     st.rerun()
-        with c2:
+        with row[2]:
             with st.popover("Edit"):
                 if st.button("↩ Undo", use_container_width=True,
                              key="m_undo", disabled=not has_spec):
@@ -140,7 +149,7 @@ def menubar(doc_title: str, step_idx: int, has_spec: bool):
                 if st.button("＋ Add slot", use_container_width=True,
                              key="m_slot", disabled=not has_spec):
                     _add_feature("slot")
-        with c3:
+        with row[3]:
             with st.popover("View"):
                 if st.button("◉ Fit 3D view", use_container_width=True,
                              key="m_fit", disabled=not has_spec):
@@ -153,11 +162,11 @@ def menubar(doc_title: str, step_idx: int, has_spec: bool):
                     st.session_state["show_rect"] = \
                         not st.session_state.get("show_rect", False)
                     st.rerun()
-        with c4:
+        with row[4]:
             with st.popover("Window"):
                 st.toggle("Correction box", value=True, key="show_correct")
                 st.toggle("Part spec (JSON)", value=False, key="show_json")
-        with c5:
+        with row[5]:
             with st.popover("Help"):
                 st.markdown(
                     "**PartForge in 3 steps**\n\n"
@@ -170,10 +179,10 @@ def menubar(doc_title: str, step_idx: int, has_spec: bool):
                     "The card's 4 markers turn photo pixels into millimetres. "
                     "Thickness is measured from side views or your caliper — "
                     "never from the top photo.")
-    with bar_c:
+    with bar[1]:
         st.markdown(f"<div class='pf-doctitle'>{doc_title}</div>",
                     unsafe_allow_html=True)
-    with bar_r:
+    with bar[2]:
         with st.popover("Export ▾"):
             st.download_button("🖨 STL — print it",
                                st.session_state.get("dl_stl", b""),
@@ -189,7 +198,7 @@ def menubar(doc_title: str, step_idx: int, has_spec: bool):
         f"<div class='pf-step {'now' if i == step_idx else ('done' if i < step_idx else '')}'>"
         f"{'✓ ' if i < step_idx else ''}{i + 1}. {name}</div>"
         for i, name in enumerate(STEPS)) + "</div>"
-    st.markdown(steps_html, unsafe_allow_html=True)
+    st.markdown(steps_html + "</div>", unsafe_allow_html=True)
 
 
 def _add_feature(kind: str):
