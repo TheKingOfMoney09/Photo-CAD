@@ -159,7 +159,7 @@ def menubar(doc_title: str, step_idx: int, has_spec: bool):
                     st.rerun()
                 st.toggle("Dimension diagram", value=True, key="show_diagram")
                 if st.button("🖼 Rectified photos", use_container_width=True,
-                             key="m_rect", disabled=not has_spec):
+                             key="m_rect"):
                     st.session_state["show_rect"] = \
                         not st.session_state.get("show_rect", False)
                     st.rerun()

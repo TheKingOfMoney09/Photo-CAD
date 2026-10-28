@@ -265,6 +265,8 @@ else:
 
 # ---------------------------------------------------------------- persistent error panel
 # process_photo stores failures in ss.errors; this panel survives reruns.
+# Rectified/mask layers render INLINE here — the Review tab doesn't exist
+# when top failed, so View-menu gating can't apply to forensics.
 if ss.get("errors"):
     with st.container():
         st.error("**Could not measure " +
@@ -274,9 +276,6 @@ if ss.get("errors"):
             c1, c2 = st.columns([3, 1])
             with c1:
                 st.markdown(f"**{role.capitalize()}:** {err}")
-                st.caption("Open View → Rectified photos → 'What I segmented' "
-                           "to see what PartForge called 'part'. Grey wash = "
-                           "dim light; streaks = glare/shadow merged in.")
             with c2:
                 if st.button("Retake view", key=f"retake_{role}"):
                     ss.pending.pop(role, None)
@@ -285,6 +284,17 @@ if ss.get("errors"):
                     ss.errors.pop(role, None)
                     ss.cap_open = True
                     st.rerun()
+            if ss.views_mask.get(role) is not None:
+                m1, m2 = st.columns(2)
+                with m1:
+                    st.image(ss.views_png.get(role),
+                             caption=f"{role}: rectified photo")
+                with m2:
+                    st.image(ss.views_mask.get(role),
+                             caption=f"{role}: What I segmented — white = treated as part")
+            else:
+                st.caption("No segmentation to show — the card itself "
+                           "wasn't found (not all 4 markers detected).")
         st.markdown("---")
 
 # ---------------------------------------------------------------- main

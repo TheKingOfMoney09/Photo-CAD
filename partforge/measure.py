@@ -184,17 +184,22 @@ def measure_photo(img_bgr: np.ndarray, mask: np.ndarray | None = None,
             mask, np.diag([ppm, ppm, 1.0]) @ H,
             (rect.shape[1], rect.shape[0]))
     spec = measure_mask(mask, ppm)
-    if spec is not None:
-        frac = float((mask > 0).mean())
-        # Guard: if the "part" covers most of the card interior, we segmented
-        # the CARD (dim light / glare), not the part. Refuse, don't CAD garbage.
-        if frac > 0.55:
-            return None, None, 0.0, {
-                "card_markers": ids,
-                "error": (f"Segmented {frac:.0%} of the card — that's the card, "
-                          f"not the part (dim/flash light?). Retake with diffuse "
-                          f"daylight, or check the 'What I segmented' layer."),
-                "mask": mask, "rect": rect, "thresh_used": thresh_used}
+    if spec is None:
+        return None, None, 0.0, {
+            "card_markers": ids,
+            "error": ("Card found, but no measurable part outline survived "
+                      "(mask empty or fragmented — check 'What I segmented')."),
+            "mask": mask, "rect": rect, "thresh_used": thresh_used}
+    frac = float((mask > 0).mean())
+    # Guard: if the "part" covers most of the card interior, we segmented
+    # the CARD (dim light / glare), not the part. Refuse, don't CAD garbage.
+    if frac > 0.55:
+        return None, None, 0.0, {
+            "card_markers": ids,
+            "error": (f"Segmented {frac:.0%} of the card — that's the card, "
+                      f"not the part (dim/flash light?). Retake with diffuse "
+                      f"daylight, or check the 'What I segmented' layer."),
+            "mask": mask, "rect": rect, "thresh_used": thresh_used}
     return spec, rect, ppm, {"card_markers": ids,
                              "mask": mask,
                              "rect": rect,
