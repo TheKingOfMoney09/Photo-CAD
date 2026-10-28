@@ -31,6 +31,8 @@ ss.setdefault("views_png", {})
 ss.setdefault("views_mask", {})
 ss.setdefault("photo_names", {})
 ss.setdefault("pending", {})   # role -> raw bytes staged for processing
+ss.setdefault("staged_side", {})  # side/front specs waiting for a top
+ss.setdefault("errors", {})    # role -> last measurement error (persistent)
 ss.setdefault("pf_hist", [])   # undo stack of spec_json
 ss.setdefault("log", [])
 ss.setdefault("pf_tol", 0.2)
@@ -70,7 +72,11 @@ def build_exports(spec_json: str, tol: float):
 
 def process_photo(img_bgr: np.ndarray, name: str, thresh: int,
                   role: str = "top") -> None:
-    """role: top | side | front. Top replaces the master; sides fuse into it."""
+    """role: top | side | front. Top replaces the master; sides fuse into it.
+
+    Returns True on success, False on failure (error is stored in
+    ss.errors[role] so it survives reruns instead of flashing away).
+    """
     spec, rect, ppm, info = measure_photo(img_bgr, thresh=thresh)
     if spec is None:
         err = info.get("error", "unknown")
@@ -82,11 +88,17 @@ def process_photo(img_bgr: np.ndarray, name: str, thresh: int,
             okm, mbuf = cv2.imencode(".png", info["mask"])
             ss.views_mask[role] = mbuf.tobytes() if okm else None
         ss.photo_names[role] = name
-        st.error(f"Could not measure '{name}' ({role}): {err} "
-                 f"(markers found: {info.get('card_markers')}). "
-                 "Check the 'What I segmented' layer, then retake or adjust threshold.")
+        ss.errors[role] = err
+        if role == "top":
+            # a failed top leaves nothing to build on: clear stale CAD
+            ss.pop("spec_json", None)
+            ss.views_png.pop("top", None)
+            ss.views_mask.pop("top", None)
+            ss.selected = None
+        # a failed side/front keeps the top master; it just doesn't fuse
         log(f"{role}: FAILED — {err[:100]}")
-        return
+        return False
+    ss.errors.pop(role, None)
     annotated = annotate(rect, spec, ppm)
     ok, buf = cv2.imencode(".png", annotated)
     ss.views_png[role] = buf.tobytes() if ok else None
@@ -103,16 +115,28 @@ def process_photo(img_bgr: np.ndarray, name: str, thresh: int,
         set_spec(spec)
         ss.selected = None
         log(f"Top: {spec.summary()}")
+        # fuse any side/front views that arrived before the top
+        pending = dict(ss.get("staged_side", {}))
+        if pending:
+            reports = fuse(spec, pending)
+            save(spec)
+            ss.staged_side = {}
+            for r, rep in reports.items():
+                if r != "top":
+                    log(f"{r}: {rep}")
     else:
         master = get_spec()
         if master is None:
-            set_spec(spec)  # side-only edge case: at least show something
-            log(f"{role}: no top yet — showing it as master for now")
-            return
+            # side before any top: stage it, don't pretend it's the master.
+            # it fuses automatically once a top succeeds (see below).
+            ss.staged_side[role] = spec
+            log(f"{role}: staged — run a top view to fuse it in")
+            return True
         reports = fuse(master, {role: spec})
         clear_inputs(("ans_",))  # questions changed; keep dimension edits
         save(master)
         log(f"{role}: {reports.get(role, 'fused')}")
+    return True
 
 
 def cb_hole(hid: str, field: str):
@@ -238,8 +262,33 @@ else:
     thresh = 210
     tol = ss.get("pf_tol", 0.2)
 
+# ---------------------------------------------------------------- persistent error panel
+# process_photo stores failures in ss.errors; this panel survives reruns.
+if ss.get("errors"):
+    with st.container():
+        st.error("**Could not measure " +
+                 ", ".join(f"{r} ({ss.photo_names.get(r, '')})"
+                            for r in ss.errors) + "**")
+        for role, err in ss.errors.items():
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                st.markdown(f"**{role.capitalize()}:** {err}")
+                st.caption("Open View → Rectified photos → 'What I segmented' "
+                           "to see what PartForge called 'part'. Grey wash = "
+                           "dim light; streaks = glare/shadow merged in.")
+            with c2:
+                if st.button("Retake view", key=f"retake_{role}"):
+                    ss.pending.pop(role, None)
+                    ss.views_png.pop(role, None)
+                    ss.views_mask.pop(role, None)
+                    ss.errors.pop(role, None)
+                    ss.cap_open = True
+                    st.rerun()
+        st.markdown("---")
+
 # ---------------------------------------------------------------- main
-if spec is None:
+spec = get_spec()
+if spec is None and not ss.get("errors"):
     st.markdown(
         """<div class="pf-hero">
         <h1>🔩 PartForge</h1>
@@ -250,6 +299,12 @@ if spec is None:
         ② attach <b>top / side / front</b> photos in the ① Capture panel →
         ③ <span class="pf-kbd">🔨 Measure → build CAD</span></p>
         </div>""", unsafe_allow_html=True)
+    st.stop()
+
+if spec is None:
+    # total failure (top refused): nothing to review, error panel above says why
+    st.info("No measurable part yet. Fix the views above (Retake view), "
+            "then press Measure again.")
     st.stop()
 
 st.subheader(f"Measured part — {spec.summary()}")

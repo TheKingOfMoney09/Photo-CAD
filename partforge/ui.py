@@ -130,8 +130,9 @@ def menubar(doc_title: str, step_idx: int, has_spec: bool):
                                    help="Print at exactly 210x148 mm (100% scale).")
                 if st.button("🗑 Clear project", use_container_width=True,
                              key="m_clear"):
-                    for k in ("spec_json", "selected", "views_png", "photo_names",
-                              "pending", "dl_stl", "dl_step", "pf_step",
+                    for k in ("spec_json", "selected", "views_png", "views_mask",
+                              "photo_names", "pending", "staged_side", "errors",
+                              "dl_stl", "dl_step",
                               "show_rect", "show_diagram"):
                         st.session_state.pop(k, None)
                     st.rerun()
