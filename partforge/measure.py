@@ -167,7 +167,9 @@ def measure_photo(img_bgr: np.ndarray, mask: np.ndarray | None = None,
             mask, np.diag([ppm, ppm, 1.0]) @ H,
             (rect.shape[1], rect.shape[0]))
     spec = measure_mask(mask, ppm)
-    return spec, rect, ppm, {"card_markers": ids}
+    return spec, rect, ppm, {"card_markers": ids,
+                             "mask": mask,
+                             "rect": rect}
 
 
 def annotate(rect_bgr: np.ndarray, spec: PartSpec, px_per_mm: float) -> np.ndarray:

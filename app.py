@@ -28,6 +28,7 @@ ss = st.session_state
 ss.setdefault("spec_json", None)
 ss.setdefault("selected", None)
 ss.setdefault("views_png", {})
+ss.setdefault("views_mask", {})
 ss.setdefault("photo_names", {})
 ss.setdefault("pending", {})   # role -> raw bytes staged for processing
 ss.setdefault("pf_hist", [])   # undo stack of spec_json
@@ -80,6 +81,10 @@ def process_photo(img_bgr: np.ndarray, name: str, thresh: int,
     annotated = annotate(rect, spec, ppm)
     ok, buf = cv2.imencode(".png", annotated)
     ss.views_png[role] = buf.tobytes() if ok else None
+    mask = info.get("mask")
+    if mask is not None:
+        okm, mbuf = cv2.imencode(".png", mask)
+        ss.views_mask[role] = mbuf.tobytes() if okm else None
     ss.photo_names[role] = name
     if role == "top":
         set_spec(spec)
@@ -255,17 +260,33 @@ with tab_review:
             st.image(diagram_png,
                      caption="Dimension diagram — numbers match the panel on the right")
         if ss.get("show_rect", False):
+            tabs = st.tabs([r.capitalize() for r in ("top", "side", "front")
+                            if ss.views_png.get(r)])
+            i = 0
             for role in ("top", "side", "front"):
-                if ss.views_png.get(role):
-                    with st.expander(f"{role.capitalize()} view (rectified) — "
-                                     f"{ss.photo_names.get(role, '')}"):
+                if not ss.views_png.get(role):
+                    continue
+                with tabs[i]:
+                    i += 1
+                    sel = st.radio("Layer", ("Measured photo", "What I segmented"),
+                                   key=f"layer_{role}", horizontal=True,
+                                   help="Measured photo = annotated rectified view. "
+                                        "What I segmented = the mask PartForge treated as the part. "
+                                        "If the mask is wrong, the CAD will be wrong.")
+                    if sel == "Measured photo":
                         st.image(ss.views_png[role])
-                        rep = (get_spec().view_reports or {}).get(role)
-                        if rep:
-                            st.caption(rep)
+                    else:
+                        st.image(ss.views_mask.get(role),
+                                 caption="White = treated as part. Grey specks / shadows included = bad mask.")
+                    rep = (get_spec().view_reports or {}).get(role)
+                    if rep:
+                        st.caption(rep)
+                    if role == "top" and ss.get(f"mask_flag_{role}") is None:
+                        pass  # placeholder for future per-view threshold
 
     with right:
         # ----- asks
+        with st.container():
             questions = spec.questions()
             if questions:
                 st.markdown("### ❓ PartForge asks")
