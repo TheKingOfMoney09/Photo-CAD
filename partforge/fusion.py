@@ -21,7 +21,7 @@ import numpy as np
 
 from .spec import Bend, PartSpec
 
-RECT_FILL = 0.85   # contour/bbox fill required to accept a thickness vote
+RECT_FILL = 0.82   # contour/bbox fill required to accept a thickness vote
 AGREE_MM = 0.6     # votes within this spread agree
 MATCH_TOL = 0.06   # long-dim match to top outline (relative)
 KINK_MIN_MM = 4.0  # convexity-defect depth that counts as a bend
@@ -100,6 +100,7 @@ def fuse(top: PartSpec, views: dict[str, PartSpec]) -> dict[str, str]:
         "top": (f"Top: {top.width_mm:.1f}x{top.height_mm:.1f} mm, "
                 f"{len(top.holes)} holes, {len(top.slots)} slots")}
     votes: list[float] = []
+    roles: dict[str, float] = dict(top.thickness_vote_roles or {})
     for role in ("side", "front"):
         v = views.get(role)
         if v is None or not v.outline_mm:
@@ -135,22 +136,22 @@ def fuse(top: PartSpec, views: dict[str, PartSpec]) -> dict[str, str]:
         if fill < RECT_FILL:
             reports[role] = (
                 f"{role}: profile is not a clean rectangle "
-                f"(fill {fill:.2f}) - no thickness vote, check the pose.")
+                f"(fill {fill:.2f} < {RECT_FILL}) - no thickness vote, "
+                f"check the pose.")
         elif m is None:
             reports[role] = (
                 f"{role}: long side {long:.1f} mm matches neither top W "
                 f"{top.width_mm:.1f} nor H {top.height_mm:.1f} - check the pose.")
         else:
             votes.append(round(short, 2))
+            roles[role] = round(short, 2)
             reports[role] = (
                 f"{role}: long side {long:.1f} ~= top "
                 f"{'W' if m == 'W' else 'H'} ok, thickness vote "
                 f"{short:.1f} mm.")
-    if votes:
-        seen = [round(v, 2) for v in (top.thickness_votes or [])]
-        for v in votes:
-            if not any(abs(v - s) < 0.05 for s in seen):
-                seen.append(v)
+    if roles:
+        seen = sorted(roles.values())
+        top.thickness_vote_roles = roles
         top.thickness_votes = seen
         top.thickness_mm = round(sum(seen) / len(seen), 2)
         if len(seen) >= 2 and max(seen) - min(seen) <= AGREE_MM:

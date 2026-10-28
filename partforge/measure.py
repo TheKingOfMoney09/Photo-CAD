@@ -21,12 +21,25 @@ def segment_fallback(rect_bgr: np.ndarray, thresh: int = 210) -> np.ndarray:
     Works when the part lies on the white calibration card. The card's own
     graphics (border, ArUco markers, scale bar) sit at known mm positions
     in rectified space and are masked out first. Returns uint8 mask.
+
+    thresh <= 0 means Otsu auto-threshold on the background peak: lighting
+    varies between phones/flash/daylight, so a fixed 210 breaks on dim
+    shots (card goes grey -> whole card segments as "part").
     """
     from .card import CARD_H_MM, CARD_W_MM, MARKER_CENTERS, MARKER_MM
 
     gray = cv2.cvtColor(rect_bgr, cv2.COLOR_BGR2GRAY)
     sat = cv2.cvtColor(rect_bgr, cv2.COLOR_BGR2HSV)[:, :, 1]
-    dark_or_colored = ((gray < thresh) | (sat > 60)).astype(np.uint8) * 255
+    if thresh and thresh > 0:
+        t = thresh
+    else:
+        # Otsu on the card area only (centre 60% x 30% is usually background)
+        h, w = gray.shape
+        probe = gray[int(h * 0.35):int(h * 0.65), int(w * 0.2):int(w * 0.8)]
+        t, _ = cv2.threshold(probe, 0, 255,
+                             cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        t = float(max(60.0, min(225.0, t - 12.0)))  # margin: card stays bg
+    dark_or_colored = ((gray < t) | (sat > 60)).astype(np.uint8) * 255
     h_px, w_px = dark_or_colored.shape
     ppm_x, ppm_y = w_px / CARD_W_MM, h_px / CARD_H_MM
 
@@ -49,7 +62,7 @@ def segment_fallback(rect_bgr: np.ndarray, thresh: int = 210) -> np.ndarray:
         mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     out = np.zeros_like(mask)
     if hierarchy is None:
-        return out
+        return out, t
     hierarchy = hierarchy[0]
     h, w = mask.shape
     for i, c in enumerate(contours):
@@ -64,7 +77,7 @@ def segment_fallback(rect_bgr: np.ndarray, thresh: int = 210) -> np.ndarray:
             while child != -1:  # keep holes/slots as holes in the mask
                 cv2.drawContours(out, [contours[child]], -1, 0, -1)
                 child = hierarchy[child][0]
-    return out
+    return out, t
 
 
 def _circularity(contour) -> float:
@@ -153,23 +166,39 @@ def measure_mask(mask: np.ndarray, px_per_mm: float,
 
 
 def measure_photo(img_bgr: np.ndarray, mask: np.ndarray | None = None,
-                  thresh: int = 210):
-    """Full path: photo -> (spec, rectified_img, px_per_mm, info)."""
+                  thresh: int = 0):
+    """Full path: photo -> (spec, rectified_img, px_per_mm, info).
+
+    thresh <= 0 (default) = Otsu auto-threshold per photo.
+    """
     H, ids = detect_card(img_bgr)
     if H is None:
         return None, None, 0.0, {"card_markers": ids,
                                  "error": "Calibration card not found (need all 4 markers)."}
     rect, ppm = rectify(img_bgr, H)
     if mask is None:
-        mask = segment_fallback(rect, thresh=thresh)
+        mask, thresh_used = segment_fallback(rect, thresh=thresh)
     else:
+        thresh_used = thresh
         mask = cv2.warpPerspective(
             mask, np.diag([ppm, ppm, 1.0]) @ H,
             (rect.shape[1], rect.shape[0]))
     spec = measure_mask(mask, ppm)
+    if spec is not None:
+        frac = float((mask > 0).mean())
+        # Guard: if the "part" covers most of the card interior, we segmented
+        # the CARD (dim light / glare), not the part. Refuse, don't CAD garbage.
+        if frac > 0.55:
+            return None, None, 0.0, {
+                "card_markers": ids,
+                "error": (f"Segmented {frac:.0%} of the card — that's the card, "
+                          f"not the part (dim/flash light?). Retake with diffuse "
+                          f"daylight, or check the 'What I segmented' layer."),
+                "mask": mask, "rect": rect, "thresh_used": thresh_used}
     return spec, rect, ppm, {"card_markers": ids,
                              "mask": mask,
-                             "rect": rect}
+                             "rect": rect,
+                             "thresh_used": thresh_used}
 
 
 def annotate(rect_bgr: np.ndarray, spec: PartSpec, px_per_mm: float) -> np.ndarray:

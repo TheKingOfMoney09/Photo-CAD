@@ -73,10 +73,19 @@ def process_photo(img_bgr: np.ndarray, name: str, thresh: int,
     """role: top | side | front. Top replaces the master; sides fuse into it."""
     spec, rect, ppm, info = measure_photo(img_bgr, thresh=thresh)
     if spec is None:
-        st.error(f"Could not measure '{name}' ({role}): "
-                 f"{info.get('error', 'unknown')} "
+        err = info.get("error", "unknown")
+        # keep the forensic layers even on failure (mask/rect explain why)
+        if info.get("rect") is not None:
+            ok, buf = cv2.imencode(".png", info["rect"])
+            ss.views_png[role] = buf.tobytes() if ok else None
+        if info.get("mask") is not None:
+            okm, mbuf = cv2.imencode(".png", info["mask"])
+            ss.views_mask[role] = mbuf.tobytes() if okm else None
+        ss.photo_names[role] = name
+        st.error(f"Could not measure '{name}' ({role}): {err} "
                  f"(markers found: {info.get('card_markers')}). "
-                 "Need all 4 card markers visible.")
+                 "Check the 'What I segmented' layer, then retake or adjust threshold.")
+        log(f"{role}: FAILED — {err[:100]}")
         return
     annotated = annotate(rect, spec, ppm)
     ok, buf = cv2.imencode(".png", annotated)
@@ -86,6 +95,10 @@ def process_photo(img_bgr: np.ndarray, name: str, thresh: int,
         okm, mbuf = cv2.imencode(".png", mask)
         ss.views_mask[role] = mbuf.tobytes() if okm else None
     ss.photo_names[role] = name
+    tu = info.get("thresh_used")
+    if tu is not None:
+        tag = "auto" if ss.get("auto_thresh", True) else "manual"
+        log(f"{role}: threshold {float(tu):.0f} ({tag})")
     if role == "top":
         set_spec(spec)
         ss.selected = None
@@ -165,8 +178,15 @@ if cap_open:
     staged = [r for r in ("top", "side", "front") if ss.pending.get(r)]
     co1, co2, co3 = st.columns([1.4, 1.1, 1.5])
     with co1:
-        thresh = st.slider("Segmentation threshold", 120, 250, 210,
-                           help="Lower if the part is missed, higher if card text is picked up.")
+        auto_t = st.checkbox("Auto threshold (Otsu)", value=True,
+                             key="auto_thresh",
+                             help="Per-photo threshold from the card background. "
+                                  "Uncheck to set manually.")
+        if auto_t:
+            thresh = 0
+        else:
+            thresh = st.slider("Segmentation threshold", 60, 250, 150,
+                               help="Lower if the part is missed, higher if card text is picked up.")
     with co2:
         tol = st.slider("Print hole tolerance (mm)", 0.0, 0.4, 0.2, 0.05,
                         help="Extra clearance so printed holes fit real bolts.")

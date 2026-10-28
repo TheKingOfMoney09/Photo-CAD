@@ -56,6 +56,7 @@ class PartSpec(BaseModel):
     type: Literal["plate", "bracket"] = "plate"
     thickness_mm: Optional[float] = None
     thickness_votes: list[float] = Field(default_factory=list)  # measured votes from side/front views
+    thickness_vote_roles: dict[str, float] = Field(default_factory=dict)  # role -> vote
     thickness_confidence: float = 0.0  # 0..1; photo can never make this 1.0
     view_reports: dict[str, str] = Field(default_factory=dict)  # per-view fusion notes
     outline_mm: list[list[float]] = Field(default_factory=list)  # polygon, mm
