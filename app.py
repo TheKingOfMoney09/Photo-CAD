@@ -43,7 +43,8 @@ def log(msg: str) -> None:
 
 
 def get_spec() -> PartSpec | None:
-    return PartSpec(**ss.spec_json) if ss.spec_json else None
+    j = ss.get("spec_json")
+    return PartSpec(**j) if j else None
 
 
 def clear_inputs(prefixes=("hole_", "slot_", "ans_", "dim_", "view_")):
