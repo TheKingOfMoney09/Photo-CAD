@@ -31,8 +31,7 @@ ss.setdefault("views_png", {})
 ss.setdefault("views_mask", {})
 ss.setdefault("photo_names", {})
 ss.setdefault("pending", {})   # role -> raw bytes staged for processing
-ss.setdefault("originals", {})  # role -> original jpg bytes (tap re-measure)
-ss.setdefault("tap_mode", {})   # role -> True when tap-to-select is active
+ss.setdefault("sam_cache", {})  # sha1(jpg) -> measured view (no re-call SAM)
 ss.setdefault("staged_side", {})  # side/front specs waiting for a top
 ss.setdefault("errors", {})    # role -> last measurement error (persistent)
 ss.setdefault("pf_hist", [])   # undo stack of spec_json
@@ -73,7 +72,7 @@ def build_exports(spec_json: str, tol: float):
             cad.top_view_png(spec))
 
 
-def process_photo(img_bgr: np.ndarray, name: str, thresh: int,
+def process_photo(img_bgr: np.ndarray, name: str,
                   role: str = "top") -> None:
     """role: top | front. Top gives profile+holes+slots; front gives height.
 
@@ -116,10 +115,6 @@ def process_photo(img_bgr: np.ndarray, name: str, thresh: int,
             ss.views_mask[role] = mbuf.tobytes() if okm else None
         ss.photo_names[role] = name
         ss.errors[role] = err
-        # keep originals even on failure: tap-to-select needs them
-        ok_o, obuf = cv2.imencode(".jpg", img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
-        if ok_o:
-            ss.originals[role] = obuf.tobytes()
         if role == "top":
             # a failed top leaves nothing to build on: clear stale CAD
             ss.pop("spec_json", None)
@@ -130,7 +125,6 @@ def process_photo(img_bgr: np.ndarray, name: str, thresh: int,
         log(f"{role}: FAILED — {err[:100]}")
         return False
     ss.errors.pop(role, None)
-    ss.originals[role] = obuf.tobytes()
     annotated = annotate(rect, spec, ppm)
     ok, buf = cv2.imencode(".png", annotated)
     ss.views_png[role] = buf.tobytes() if ok else None
@@ -230,28 +224,18 @@ if cap_open:
             ss.pending[role] = up.getvalue()
             ss.photo_names[role] = up.name
     staged = [r for r in ("top", "side", "front") if ss.pending.get(r)]
-    co1, co2, co3 = st.columns([1.4, 1.1, 1.5])
+    co1, co2 = st.columns([1.4, 1.6])
     with co1:
-        auto_t = st.checkbox("Auto threshold (Otsu)", value=True,
-                             key="auto_thresh",
-                             help="Per-photo threshold from the card background. "
-                                  "Uncheck to set manually.")
-        if auto_t:
-            thresh = 0
-        else:
-            thresh = st.slider("Segmentation threshold", 60, 250, 150,
-                               help="Lower if the part is missed, higher if card text is picked up.")
-    with co2:
         tol = st.slider("Print hole tolerance (mm)", 0.0, 0.4, 0.2, 0.05,
                         help="Extra clearance so printed holes fit real bolts.")
         ss.pf_tol = tol
-    with co3:
+    with co2:
         st.write("")
         st.write("")
         if staged:
             if st.button("🔨 Measure → build CAD", type="primary",
                          use_container_width=True):
-                with st.spinner("Measuring… (rectify → segment → measure → fuse)"):
+                with st.spinner("Measuring… (SAM segment → fit shapes → fuse)"):
                     if "top" not in staged:
                         st.error("Top view is required — attach the flat-lay photo.")
                     else:
@@ -260,7 +244,7 @@ if cap_open:
                                 np.frombuffer(ss.pending[role], np.uint8),
                                 cv2.IMREAD_COLOR)
                             process_photo(img, ss.photo_names.get(role, f"{role}.jpg"),
-                                          thresh, role)
+                                          role)
                             del ss.pending[role]
                         ss.cap_open = False  # collapse capture: menus on top
                         st.rerun()
@@ -271,14 +255,14 @@ if cap_open:
             st.caption("Attach photos above, or try a synthetic demo:")
             dd1, dd2, dd3 = st.columns(3)
             if dd1.button("▶ Plate", use_container_width=True, key="demo_plate"):
-                process_photo(make_synthetic_photo(), "synthetic top", thresh, "top")
-                process_photo(make_synthetic_side("W"), "synthetic side", thresh, "side")
-                process_photo(make_synthetic_side("H"), "synthetic front", thresh, "front")
+                process_photo(make_synthetic_photo(), "synthetic top", "top")
+                process_photo(make_synthetic_side("W"), "synthetic side", "side")
+                process_photo(make_synthetic_side("H"), "synthetic front", "front")
                 ss.cap_open = False
                 st.rerun()
             if dd2.button("▶ Bracket", use_container_width=True, key="demo_bracket"):
-                process_photo(make_synthetic_photo(), "synthetic top", thresh, "top")
-                process_photo(make_synthetic_bracket_side(), "synthetic L", thresh, "side")
+                process_photo(make_synthetic_photo(), "synthetic top", "top")
+                process_photo(make_synthetic_bracket_side(), "synthetic L", "side")
                 ss.cap_open = False
                 st.rerun()
             if dd3.button("▢ Blank plate", use_container_width=True, key="demo_blank"):
@@ -288,84 +272,13 @@ if cap_open:
                 log("Blank 80x40x3 plate created — edit freely")
                 st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
-else:
-    thresh = 210
+    tol = ss.get("pf_tol", 0.2)
     tol = ss.get("pf_tol", 0.2)
 
 # ---------------------------------------------------------------- persistent error panel
 # process_photo stores failures in ss.errors; this panel survives reruns.
 # Rectified/mask layers render INLINE here — the Review tab doesn't exist
 # when top failed, so View-menu gating can't apply to forensics.
-# ss.resegment (set of roles) opens the same tap picker for views that
-# measured but produced a wrong shape.
-tap_roles = ([r for r in ss.errors] +
-             [r for r in getattr(ss, "resegment", set()) if r not in ss.errors])
-def tap_resegment_panel(role: str, thresh: float, key_suffix: str = "") -> None:
-    """Rectified photo + mask + tap picker + re-measure for one view."""
-    ks = f"{role}{key_suffix}"
-    if ss.views_mask.get(role) is not None:
-        m1, m2 = st.columns(2)
-        with m1:
-            st.image(ss.views_png.get(role), caption=f"{ks}: rectified photo")
-        with m2:
-            st.image(ss.views_mask.get(role),
-                     caption=f"{ks}: What I segmented — white = treated as part")
-        if ss.originals.get(role) and ss.views_png.get(role):
-            if st.button("👆 Tap to select the part", key=f"tapmode_{ks}",
-                         help="Auto-segmentation merged shadows/glare. "
-                              "Tap the metal face; PartForge cuts from your taps."):
-                ss.tap_mode[role] = not ss.tap_mode.get(role, False)
-                st.rerun()
-            if ss.tap_mode.get(role):
-                from partforge.tap_picker import tap_picker
-                picked = tap_picker(
-                    ss.views_png[role],
-                    ss.get(f"taps_{ks}", []),
-                    ss.get(f"eraser_{ks}", []),
-                    key=f"tap_{ks}")
-                if picked:
-                    ss[f"taps_{ks}"] = picked.get("taps", [])
-                    ss[f"eraser_{ks}"] = picked.get("eraser", [])
-                if st.button("🔁 Re-measure from taps",
-                             key=f"retap_{ks}", type="primary",
-                             disabled=not ss.get(f"taps_{ks}")):
-                    from partforge.card import detect_card, CARD_H_MM, CARD_W_MM
-                    orig = cv2.imdecode(
-                        np.frombuffer(ss.originals[role], np.uint8),
-                        cv2.IMREAD_COLOR)
-                    H, _ = detect_card(orig)
-                    if H is None:
-                        st.error("Card lost in stored photo — retake the view.")
-                    else:
-                        import numpy as _np
-                        # rectified = scale @ H @ orig; invert for taps
-                        rp = cv2.imdecode(
-                            np.frombuffer(ss.views_png[role], np.uint8),
-                            cv2.IMREAD_COLOR)
-                        rh, rw = rp.shape[:2]
-                        S = _np.diag([rw / CARD_W_MM, rh / CARD_H_MM, 1.0])
-                        inv = _np.linalg.inv(S @ H)
-
-                        def back(pts):
-                            out = []
-                            for x, y in pts:
-                                p = inv @ _np.array([x, y, 1.0])
-                                out.append((float(p[0] / p[2]),
-                                            float(p[1] / p[2])))
-                            return out
-                        process_photo(
-                            orig, ss.photo_names.get(role, f"{ks}.jpg"),
-                            thresh, role,
-                            taps=back(ss[f"taps_{ks}"]),
-                            eraser=back(ss.get(f"eraser_{ks}", [])))
-                        ss.tap_mode[role] = False
-                        (getattr(ss, "resegment", set()) or set()).discard(role)
-                        st.rerun()
-    else:
-        st.caption("No segmentation to show — the card itself "
-                   "wasn't found (not all 4 markers detected).")
-
-
 if ss.get("errors"):
     with st.container():
         st.error("**Could not measure " +
@@ -383,16 +296,14 @@ if ss.get("errors"):
                     ss.errors.pop(role, None)
                     ss.cap_open = True
                     st.rerun()
-            tap_resegment_panel(role, thresh, key_suffix="_err")
-        st.markdown("---")
-
-if getattr(ss, "resegment", set()):
-    with st.container():
-        st.warning("**Re-segmenting from your taps** — click the metal face, "
-                   "then Re-measure. (Auto threshold merged shadows/glare.)")
-        for role in sorted(getattr(ss, "resegment", set())):
-            st.markdown(f"**{role.capitalize()}**")
-            tap_resegment_panel(role, thresh, key_suffix="_err")
+            if ss.views_mask.get(role) is not None:
+                m1, m2 = st.columns(2)
+                with m1:
+                    st.image(ss.views_png.get(role),
+                             caption=f"{role}: rectified photo")
+                with m2:
+                    st.image(ss.views_mask.get(role),
+                             caption=f"{role}: SAM part mask")
         st.markdown("---")
 
 # ---------------------------------------------------------------- main
@@ -452,28 +363,18 @@ with tab_review:
                     continue
                 with tabs[i]:
                     i += 1
-                    sel = st.radio("Layer", ("Measured photo", "What I segmented"),
+                    sel = st.radio("Layer", ("Measured photo", "SAM part mask"),
                                    key=f"layer_{role}", horizontal=True,
                                    help="Measured photo = annotated rectified view. "
-                                        "What I segmented = the mask PartForge treated as the part. "
-                                        "If the mask is wrong, the CAD will be wrong.")
+                                        "SAM part mask = what SAM 3 returned for 'part'.")
                     if sel == "Measured photo":
                         st.image(ss.views_png[role])
                     else:
                         st.image(ss.views_mask.get(role),
-                                 caption="White = treated as part. Grey specks / shadows included = bad mask.")
+                                 caption="SAM 'part' mask for this view.")
                     rep = (get_spec().view_reports or {}).get(role)
                     if rep:
                         st.caption(rep)
-                    if st.button("👆 Wrong shape? tap to re-select",
-                                 key=f"retap_review_{role}",
-                                 help="Re-segment this view from your taps instead of "
-                                      "the auto threshold."):
-                        ss.resegment = set(getattr(ss, "resegment", set())) | {role}
-                        ss.tap_mode[role] = True
-                        st.rerun()
-                    if role in getattr(ss, "resegment", set()):
-                        tap_resegment_panel(role, tol, key_suffix="_rev")
 
     with right:
         # ----- asks
