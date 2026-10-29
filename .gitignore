@@ -58,3 +58,4 @@ tmp/
 temp/
 .cache/
 tmp_*.jpg
+debug/

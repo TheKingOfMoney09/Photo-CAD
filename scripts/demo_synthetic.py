@@ -1,4 +1,4 @@
-"""Multi-view regression: top + side + bracket-side synthetic photos."""
+"""Regression: SAM 3.1 pipeline on synthetic photos with known truth."""
 import sys
 from pathlib import Path
 
@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from partforge import cad
 from partforge.fusion import fuse
-from partforge.measure import measure_photo
+from partforge.pipeline import measure_view
 from partforge.synthetic import GT, make_synthetic_bracket_side, \
     make_synthetic_photo, make_synthetic_side
 
@@ -18,11 +18,18 @@ def check(name: str, cond: bool, detail: str = "") -> bool:
 
 def main() -> int:
     ok = True
-    top, _, _, _ = measure_photo(make_synthetic_photo())
+    top, _, _, info = measure_view(make_synthetic_photo(), "top")
     ok &= check("top measured", top is not None and len(top.holes) == 4,
-                top.summary() if top else "none")
+                (top.summary() if top else info.get("error", "?")) +
+                f" [{info.get('backend')}]")
+    if top is not None:
+        for gx, gy, gd in GT["holes"]:
+            near = [h for h in top.holes
+                    if abs(h.x - gx) < 1.5 and abs(h.y - gy) < 1.5]
+            got = f"d={near[0].d:.1f}" if near else "MISSING"
+            ok &= check(f"hole@{gx},{gy}", bool(near), got)
 
-    side, _, _, _ = measure_photo(make_synthetic_side("W"))
+    side, _, _, _ = measure_view(make_synthetic_side("W"), "side")
     ok &= check("side measured", side is not None,
                 f"{side.width_mm:.1f}x{side.height_mm:.1f}" if side else "none")
     fuse(top, {"side": side})
@@ -33,14 +40,14 @@ def main() -> int:
                 "long side" in str(top.view_reports.get("side", "")),
                 str(top.view_reports.get("side", ""))[:100])
 
-    front, _, _, _ = measure_photo(make_synthetic_side("H"))
+    front, _, _, _ = measure_view(make_synthetic_side("H"), "front")
     fuse(top, {"side": side, "front": front})
     th2 = top.thickness_mm
     agree = len(top.thickness_votes) == 2
     ok &= check("two votes agree", agree and top.thickness_confidence == 1.0,
                 f"votes {top.thickness_votes} -> {th2}")
 
-    br_side, _, _, _ = measure_photo(make_synthetic_bracket_side())
+    br_side, _, _, _ = measure_view(make_synthetic_bracket_side(), "side")
     tb = top.model_copy(deep=True)
     tb.type, tb.thickness_mm, tb.bend = "plate", 3.0, None
     fuse(tb, {"side": br_side})

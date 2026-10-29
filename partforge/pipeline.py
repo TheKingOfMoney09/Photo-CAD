@@ -22,7 +22,10 @@ from .sam_engine import segment
 from .shapes import fit_holes, fit_slots, polygon_to_mask
 from .spec import PartSpec
 
-PART_PROMPT = "metal bracket plate"
+PART_PROMPTS = ["metal bracket plate", "flat metal part on white card",
+                "rectangular bar", "plate", "part"]
+HOLE_PROMPT = "hole"
+SLOT_PROMPT = "slot"
 
 DEBUG_DIR = os.path.join(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))), "debug")
@@ -71,9 +74,13 @@ def measure_view(img_bgr: np.ndarray, role: str):
     rect, ppm = rectify(img_bgr, H)
     backend = _backend()
     try:
-        parts = segment(img_bgr, PART_PROMPT)
-        holes = segment(img_bgr, "hole") if role == "top" else []
-        slots = segment(img_bgr, "slot") if role == "top" else []
+        parts = []
+        for pp in PART_PROMPTS:
+            parts.extend(segment(img_bgr, pp))
+            if parts:
+                break
+        holes = segment(img_bgr, HOLE_PROMPT) if role == "top" else []
+        slots = segment(img_bgr, SLOT_PROMPT) if role == "top" else []
     except RuntimeError as e:
         return None, rect, ppm, {"error": str(e), "card_markers": ids,
                                  "rect": rect, "backend": backend}
