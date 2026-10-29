@@ -285,17 +285,18 @@ else:
 # measured but produced a wrong shape.
 tap_roles = ([r for r in ss.errors] +
              [r for r in getattr(ss, "resegment", set()) if r not in ss.errors])
-def tap_resegment_panel(role: str, thresh: float) -> None:
+def tap_resegment_panel(role: str, thresh: float, key_suffix: str = "") -> None:
     """Rectified photo + mask + tap picker + re-measure for one view."""
+    ks = f"{role}{key_suffix}"
     if ss.views_mask.get(role) is not None:
         m1, m2 = st.columns(2)
         with m1:
-            st.image(ss.views_png.get(role), caption=f"{role}: rectified photo")
+            st.image(ss.views_png.get(role), caption=f"{ks}: rectified photo")
         with m2:
             st.image(ss.views_mask.get(role),
-                     caption=f"{role}: What I segmented — white = treated as part")
+                     caption=f"{ks}: What I segmented — white = treated as part")
         if ss.originals.get(role) and ss.views_png.get(role):
-            if st.button("👆 Tap to select the part", key=f"tapmode_{role}",
+            if st.button("👆 Tap to select the part", key=f"tapmode_{ks}",
                          help="Auto-segmentation merged shadows/glare. "
                               "Tap the metal face; PartForge cuts from your taps."):
                 ss.tap_mode[role] = not ss.tap_mode.get(role, False)
@@ -304,15 +305,15 @@ def tap_resegment_panel(role: str, thresh: float) -> None:
                 from partforge.tap_picker import tap_picker
                 picked = tap_picker(
                     ss.views_png[role],
-                    ss.get(f"taps_{role}", []),
-                    ss.get(f"eraser_{role}", []),
-                    key=f"tap_{role}")
+                    ss.get(f"taps_{ks}", []),
+                    ss.get(f"eraser_{ks}", []),
+                    key=f"tap_{ks}")
                 if picked:
-                    ss[f"taps_{role}"] = picked.get("taps", [])
-                    ss[f"eraser_{role}"] = picked.get("eraser", [])
+                    ss[f"taps_{ks}"] = picked.get("taps", [])
+                    ss[f"eraser_{ks}"] = picked.get("eraser", [])
                 if st.button("🔁 Re-measure from taps",
-                             key=f"retap_{role}", type="primary",
-                             disabled=not ss.get(f"taps_{role}")):
+                             key=f"retap_{ks}", type="primary",
+                             disabled=not ss.get(f"taps_{ks}")):
                     from partforge.card import detect_card, CARD_H_MM, CARD_W_MM
                     orig = cv2.imdecode(
                         np.frombuffer(ss.originals[role], np.uint8),
@@ -338,10 +339,10 @@ def tap_resegment_panel(role: str, thresh: float) -> None:
                                             float(p[1] / p[2])))
                             return out
                         process_photo(
-                            orig, ss.photo_names.get(role, f"{role}.jpg"),
+                            orig, ss.photo_names.get(role, f"{ks}.jpg"),
                             thresh, role,
-                            taps=back(ss[f"taps_{role}"]),
-                            eraser=back(ss.get(f"eraser_{role}", [])))
+                            taps=back(ss[f"taps_{ks}"]),
+                            eraser=back(ss.get(f"eraser_{ks}", [])))
                         ss.tap_mode[role] = False
                         (getattr(ss, "resegment", set()) or set()).discard(role)
                         st.rerun()
@@ -367,7 +368,7 @@ if ss.get("errors"):
                     ss.errors.pop(role, None)
                     ss.cap_open = True
                     st.rerun()
-            tap_resegment_panel(role, thresh)
+            tap_resegment_panel(role, thresh, key_suffix="_err")
         st.markdown("---")
 
 if getattr(ss, "resegment", set()):
@@ -376,7 +377,7 @@ if getattr(ss, "resegment", set()):
                    "then Re-measure. (Auto threshold merged shadows/glare.)")
         for role in sorted(getattr(ss, "resegment", set())):
             st.markdown(f"**{role.capitalize()}**")
-            tap_resegment_panel(role, thresh)
+            tap_resegment_panel(role, thresh, key_suffix="_err")
         st.markdown("---")
 
 # ---------------------------------------------------------------- main
@@ -453,8 +454,11 @@ with tab_review:
                                  key=f"retap_review_{role}",
                                  help="Re-segment this view from your taps instead of "
                                       "the auto threshold."):
-                        ss.resegment = getattr(ss, "resegment", set()) | {role}
+                        ss.resegment = set(getattr(ss, "resegment", set())) | {role}
+                        ss.tap_mode[role] = True
                         st.rerun()
+                    if role in getattr(ss, "resegment", set()):
+                        tap_resegment_panel(role, tol, key_suffix="_rev")
 
     with right:
         # ----- asks
