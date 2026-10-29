@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 import streamlit as st
 
-from partforge import cad, meta_api, ui
+from partforge import cad, ui
 from partforge.fusion import fuse
 from partforge.measure import annotate
 from partforge.pipeline import measure_view
@@ -134,8 +134,9 @@ def process_photo(img_bgr: np.ndarray, name: str,
         okm, mbuf = cv2.imencode(".png", np.array(mask, dtype=np.uint8))
         ss.views_mask[role] = mbuf.tobytes() if okm else None
     ss.photo_names[role] = name
+    ss.sam_backend = info.get("backend", "live")
     log(f"{role}: {info.get('note', 'measured')} "
-        f"[SAM3:{info.get('backend', '?')}]")
+        f"[SAM:{info.get('backend', '?')}]")
     if role == "top":
         set_spec(spec)
         ss.selected = None
@@ -524,15 +525,8 @@ with tab_review:
                 else:
                     st.error("I could not parse that. Try 'hole 2 is 5' or 'thickness 4'.")
             if audio is not None:
-                text = meta_api.transcribe(audio.getvalue())
-                if text:
-                    st.info(f"Heard: {text}")
-                    edit = parse_edit_text(text, spec)
-                    if edit:
-                        log(apply_edit(spec, edit)); save(spec); st.rerun()
-                else:
-                    st.caption("Voice transcription is off (Muse Voice API not configured) — "
-                               "typed correction above works now.")
+                st.caption("Voice transcription is not wired in this build — "
+                           "typed correction above works now.")
 
 with tab_export:
     ss.pf_go_export = True
@@ -553,4 +547,4 @@ with tab_export:
         with st.expander("Part spec (JSON)", expanded=True):
             st.code(json.dumps(ss.spec_json, indent=1), language="json")
 
-ui.statusbar(spec, meta_api.configured(), ss.log)
+ui.statusbar(spec, ss.get("sam_backend", "live"), ss.log)

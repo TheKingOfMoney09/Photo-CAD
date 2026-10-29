@@ -228,8 +228,8 @@ def _card_bytes() -> bytes:
     return cv2.imencode(".png", render_card())[1].tobytes()
 
 
-def statusbar(spec, meta: dict, log: list[str]):
-    """Fixed bottom bar: part, units, tolerance, Meta API state, last log."""
+def statusbar(spec, sam_state: str, log: list[str]):
+    """Fixed bottom bar: part, units, tolerance, SAM backend, last log."""
     if spec is not None:
         part = (f"● {spec.type} {spec.width_mm:.1f}×{spec.height_mm:.1f}×"
                 f"{spec.thickness_mm if spec.thickness_mm is not None else '—'} mm · "
@@ -237,12 +237,12 @@ def statusbar(spec, meta: dict, log: list[str]):
                 + (f" · bend {spec.bend.angle_deg:.0f}°" if spec.bend else ""))
     else:
         part = "○ no part loaded"
-    apis = " ".join(
-        f"<span class='{'ok' if v else ''}'>{k}</span>" for k, v in meta.items())
+    sam_cls = "ok" if sam_state == "live" else ("warn" if sam_state == "mock" else "")
+    sam = f"<span class='{sam_cls}'>SAM:{sam_state}</span>"
     last = (log or ["ready"])[-1]
     st.markdown(
         f"<div class='pf-status'><span class='mono'>{part}</span>"
         f"<span>mm</span><span>tolerance +{st.session_state.get('pf_tol', 0.2):.2f}</span>"
-        f"<span style='margin-left:auto'>{apis}</span>"
+        f"<span style='margin-left:auto'>{sam}</span>"
         f"<span>{last[:80]}</span></div>",
         unsafe_allow_html=True)
