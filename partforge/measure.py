@@ -55,6 +55,39 @@ def segment_fallback(rect_bgr: np.ndarray, thresh: int = 210) -> np.ndarray:
         blank(cx - s / 2, cy - s / 2, s, s)
     blank(65, CARD_H_MM - 24, 75, 17)  # scale bar + label
     blank(48, 4, 115, 17)  # title text strip
+
+    # --- specular repair: blown highlights inside the part -----------------
+    # Shiny metal blows out to near-white, same as the card. Card-white is
+    # reachable from the image border; blowout is fully enclosed by dark
+    # part pixels. Flood-fill the background from the border on the BLANKED
+    # mask (blanked graphics read as background, so the card interior stays
+    # connected to the border through them), then merge large/irregular
+    # enclosed-dark regions... no: merge enclosed-BRIGHT regions in the gray
+    # image back into the part mask. Real holes survive via circularity.
+    bright = (gray >= t).astype(np.uint8) * 255
+    # carve the same blanked zones as background so card stays connected
+    bg = bright.copy()
+    bg[dark_or_colored == 0] = 0
+    ff = bg.copy()
+    ffmask = np.zeros((h_px + 2, w_px + 2), np.uint8)
+    try:
+        cv2.floodFill(ff, ffmask, (0, 0), 128)
+    except cv2.error:
+        pass
+    enclosed = ((bg == 255) & (ff != 128)).astype(np.uint8)
+    nlab, lab, stats, _ = cv2.connectedComponentsWithStats(enclosed)
+    ppm = (ppm_x + ppm_y) / 2
+    for i in range(1, nlab):
+        area_px = stats[i, cv2.CC_STAT_AREA]
+        comp = (lab == i).astype(np.uint8) * 255
+        cnts, _ = cv2.findContours(comp, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            continue
+        circ = _circularity(max(cnts, key=cv2.contourArea))
+        # merge blowout: irregular shape, or implausibly large for a screw hole
+        if circ < 0.45 or area_px > math.pi * ((15.0 / 2) * ppm) ** 2:
+            dark_or_colored[lab == i] = 255
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     mask = cv2.morphologyEx(dark_or_colored, cv2.MORPH_CLOSE, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
@@ -62,9 +95,10 @@ def segment_fallback(rect_bgr: np.ndarray, thresh: int = 210) -> np.ndarray:
         mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     out = np.zeros_like(mask)
     if hierarchy is None:
-        return out, t
+        return out, t, 0
     hierarchy = hierarchy[0]
     h, w = mask.shape
+    kept = 0
     for i, c in enumerate(contours):
         if hierarchy[i][3] != -1:
             continue  # roots only; holes are re-cut below
@@ -73,11 +107,12 @@ def segment_fallback(rect_bgr: np.ndarray, thresh: int = 210) -> np.ndarray:
         touches = x <= 2 or y <= 2 or x + cw >= w - 2 or y + ch >= h - 2
         if area > 0.002 * h * w and not touches:
             cv2.drawContours(out, [c], -1, 255, -1)
+            kept += 1
             child = hierarchy[i][2]
             while child != -1:  # keep holes/slots as holes in the mask
                 cv2.drawContours(out, [contours[child]], -1, 0, -1)
                 child = hierarchy[child][0]
-    return out, t
+    return out, t, kept
 
 
 def _circularity(contour) -> float:
@@ -177,13 +212,20 @@ def measure_photo(img_bgr: np.ndarray, mask: np.ndarray | None = None,
                                  "error": "Calibration card not found (need all 4 markers)."}
     rect, ppm = rectify(img_bgr, H)
     if mask is None:
-        mask, thresh_used = segment_fallback(rect, thresh=thresh)
+        mask, thresh_used, fragments = segment_fallback(rect, thresh=thresh)
     else:
-        thresh_used = thresh
+        thresh_used, fragments = thresh, 1
         mask = cv2.warpPerspective(
             mask, np.diag([ppm, ppm, 1.0]) @ H,
             (rect.shape[1], rect.shape[0]))
     spec = measure_mask(mask, ppm)
+    if spec is None:
+        return None, None, 0.0, {
+            "card_markers": ids,
+            "error": ("Card found, but no measurable part outline survived "
+                      "(mask empty or fragmented — check 'What I segmented')."),
+            "mask": mask, "rect": rect, "thresh_used": thresh_used}
+    spec.outline_fragments = fragments
     if spec is None:
         return None, None, 0.0, {
             "card_markers": ids,

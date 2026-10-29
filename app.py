@@ -394,6 +394,8 @@ with tab_review:
                         val = st.number_input("Value (mm)", 0.1, 200.0,
                                               float(q.suggested or 3.0), key=f"ans_{q.id}")
                         if st.button("Apply", key=f"ans_{q.id}_apply"):
+                            if q.id == "fragmented_mask":
+                                save(spec); st.rerun()  # dismissed, no value applied
                             spec.apply_answer(q, float(val)); save(spec); st.rerun()
 
             # ----- dimensions

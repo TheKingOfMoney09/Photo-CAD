@@ -55,10 +55,11 @@ STANDARD_HOLES = [2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 7.0, 8.0, 10.0]
 class PartSpec(BaseModel):
     type: Literal["plate", "bracket"] = "plate"
     thickness_mm: Optional[float] = None
-    thickness_votes: list[float] = Field(default_factory=list)  # measured votes from side/front views
-    thickness_vote_roles: dict[str, float] = Field(default_factory=dict)  # role -> vote
+    thickness_votes: list[float] = Field(default_factory=list)
+    thickness_vote_roles: dict[str, float] = Field(default_factory=dict)
     thickness_confidence: float = 0.0  # 0..1; photo can never make this 1.0
     view_reports: dict[str, str] = Field(default_factory=dict)  # per-view fusion notes
+    outline_fragments: int = 1  # root contours kept; >1 = split mask, low trust
     outline_mm: list[list[float]] = Field(default_factory=list)  # polygon, mm
     holes: list[Hole] = Field(default_factory=list)
     slots: list[Slot] = Field(default_factory=list)
@@ -100,6 +101,14 @@ class PartSpec(BaseModel):
     # -- the "asks" -----------------------------------------------------------
     def questions(self) -> list[Question]:
         qs: list[Question] = []
+        if getattr(self, "outline_fragments", 1) > 1:
+            qs.append(Question(
+                id="fragmented_mask", field="fragment_note",
+                text=(f"Segmentation split the part into "
+                       f"{self.outline_fragments} pieces (glare/shadows?). "
+                       f"Outline {self.width_mm:.1f}x{self.height_mm:.1f} may be "
+                       f"wrong — retake with diffuse light, or fix it by hand."),
+                kind="number", suggested=self.width_mm))
         if self.thickness_mm is None:
             qs.append(Question(
                 id="thickness", field="thickness_mm",
@@ -154,6 +163,8 @@ class PartSpec(BaseModel):
 
     def apply_answer(self, question: Question, value: float) -> None:
         f = question.field
+        if f == "fragment_note":
+            return  # informational only; user fixes the photo or edits dims
         if f == "thickness_mm":
             self.thickness_mm = value
             self.thickness_confidence = 1.0  # user (caliper) outranks photo votes
