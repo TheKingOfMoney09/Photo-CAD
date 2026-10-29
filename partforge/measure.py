@@ -185,6 +185,47 @@ def segment_tap(rect_bgr: np.ndarray, taps_px: list[tuple[int, int]],
     return out
 
 
+def _segment_from_taps(img_bgr, H, ppm, taps, eraser, sam_first=True):
+    """Tap -> mask in RECTIFIED space. SAM 3.1 (API) first, GrabCut fallback.
+
+    Returns (mask_or_None, method_name). SAM runs on the ORIGINAL photo
+    (its native input); the mask is warped into rect mm-space with the
+    same homography as the image.
+    """
+    import numpy as _np
+
+    method = "grabcut"
+    if sam_first:
+        try:
+            from .sam_provider import segment_points
+            got = segment_points(img_bgr, taps, eraser)
+        except Exception:
+            got = None
+        if got is not None:
+            sam_mask, _box, conf = got
+            warped = cv2.warpPerspective(
+                sam_mask, _np.diag([ppm, ppm, 1.0]) @ H,
+                (int(210 * ppm), int(148 * ppm)))
+            _, warped = cv2.threshold(warped, 127, 255, cv2.THRESH_BINARY)
+            _blank_card_graphics(warped,
+                                 warped.shape[1] / 210.0,
+                                 warped.shape[0] / 148.0)
+            return warped, f"sam:{conf:.2f}"
+    scale = _np.diag([ppm, ppm, 1.0]) @ H
+    taps_rect = []
+    for tx, ty in taps:
+        p = scale @ _np.array([tx, ty, 1.0])
+        taps_rect.append((float(p[0] / p[2]), float(p[1] / p[2])))
+    er_rect = []
+    for ex, ey in (eraser or []):
+        p = scale @ _np.array([ex, ey, 1.0])
+        er_rect.append((float(p[0] / p[2]), float(p[1] / p[2])))
+    import numpy as _np
+    rect = cv2.warpPerspective(img_bgr, scale,
+                               (int(210 * ppm), int(148 * ppm)))
+    return segment_tap(rect, taps_rect, er_rect), method
+
+
 def _circularity(contour) -> float:
     p = cv2.arcLength(contour, True)
     a = cv2.contourArea(contour)
@@ -272,13 +313,13 @@ def measure_mask(mask: np.ndarray, px_per_mm: float,
 
 def measure_photo(img_bgr: np.ndarray, mask: np.ndarray | None = None,
                   thresh: int = 0, taps: list[tuple[int, int]] | None = None,
-                  eraser: list[tuple[int, int]] | None = None):
+                  eraser: list[tuple[int, int]] | None = None,
+                  sam_first: bool = True):
     """Full path: photo -> (spec, rectified_img, px_per_mm, info).
 
     thresh <= 0 (default) = Otsu auto-threshold per photo.
-    taps/eraser are in ORIGINAL photo pixels; they are warped into
-    rectified space with the same homography as the image, then GrabCut
-    refines the mask from them. Tap mode replaces thresholding.
+    taps/eraser are in ORIGINAL photo pixels.
+    Tap mode: SAM 3.1 (API) first when sam_first, GrabCut offline fallback.
     """
     H, ids = detect_card(img_bgr)
     if H is None:
@@ -286,18 +327,11 @@ def measure_photo(img_bgr: np.ndarray, mask: np.ndarray | None = None,
                                  "error": "Calibration card not found (need all 4 markers)."}
     rect, ppm = rectify(img_bgr, H)
     fragments = 1
+    seg_method = "threshold"
     if taps:
         import numpy as _np
-        scale = _np.diag([ppm, ppm, 1.0]) @ H
-        taps_rect = []
-        for tx, ty in taps:
-            p = scale @ _np.array([tx, ty, 1.0])
-            taps_rect.append((float(p[0] / p[2]), float(p[1] / p[2])))
-        er_rect = []
-        for ex, ey in (eraser or []):
-            p = scale @ _np.array([ex, ey, 1.0])
-            er_rect.append((float(p[0] / p[2]), float(p[1] / p[2])))
-        mask = segment_tap(rect, taps_rect, er_rect)
+        mask, seg_method = _segment_from_taps(img_bgr, H, ppm, taps, eraser,
+                                              sam_first)
         thresh_used = thresh
         if mask is None or int((mask > 0).sum()) < 50:
             return None, None, 0.0, {
@@ -306,7 +340,8 @@ def measure_photo(img_bgr: np.ndarray, mask: np.ndarray | None = None,
                           "face, not on holes or shadows."),
                 "mask": mask if mask is not None else _np.zeros(rect.shape[:2],
                                                                  dtype=_np.uint8),
-                "rect": rect, "thresh_used": thresh_used}
+                "rect": rect, "thresh_used": thresh_used,
+                "method": seg_method}
     elif mask is None:
         mask, thresh_used, fragments = segment_fallback(rect, thresh=thresh)
     else:
@@ -321,7 +356,9 @@ def measure_photo(img_bgr: np.ndarray, mask: np.ndarray | None = None,
             "error": ("Card found, but no measurable part outline survived "
                       "(mask empty or fragmented — check 'What I segmented')."),
             "mask": mask, "rect": rect, "thresh_used": thresh_used}
-    spec.outline_fragments = fragments
+    if spec is not None:
+        spec.outline_fragments = fragments
+        spec.source = ("measured:" + seg_method) if taps else spec.source if hasattr(spec, "source") else "measured"
     if spec is None:
         return None, None, 0.0, {
             "card_markers": ids,
