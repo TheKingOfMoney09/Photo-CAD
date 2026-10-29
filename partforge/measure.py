@@ -42,19 +42,7 @@ def segment_fallback(rect_bgr: np.ndarray, thresh: int = 210) -> np.ndarray:
     dark_or_colored = ((gray < t) | (sat > 60)).astype(np.uint8) * 255
     h_px, w_px = dark_or_colored.shape
     ppm_x, ppm_y = w_px / CARD_W_MM, h_px / CARD_H_MM
-
-    def blank(x_mm, y_mm, w_mm, h_mm):
-        x0, y0 = int(x_mm * ppm_x), int(y_mm * ppm_y)
-        x1, y1 = int((x_mm + w_mm) * ppm_x), int((y_mm + h_mm) * ppm_y)
-        dark_or_colored[max(0, y0):y1, max(0, x0):x1] = 0
-
-    blank(0, 0, CARD_W_MM, 7); blank(0, CARD_H_MM - 7, CARD_W_MM, 7)
-    blank(0, 0, 7, CARD_H_MM); blank(CARD_W_MM - 7, 0, 7, CARD_H_MM)
-    for cx, cy in MARKER_CENTERS.values():
-        s = MARKER_MM + 8
-        blank(cx - s / 2, cy - s / 2, s, s)
-    blank(65, CARD_H_MM - 24, 75, 17)  # scale bar + label
-    blank(48, 4, 115, 17)  # title text strip
+    _blank_card_graphics(dark_or_colored, ppm_x, ppm_y)
 
     # --- specular repair: blown highlights inside the part -----------------
     # Shiny metal blows out to near-white, same as the card. Card-white is
@@ -113,6 +101,88 @@ def segment_fallback(rect_bgr: np.ndarray, thresh: int = 210) -> np.ndarray:
                 cv2.drawContours(out, [contours[child]], -1, 0, -1)
                 child = hierarchy[child][0]
     return out, t, kept
+
+
+def _blank_card_graphics(img: np.ndarray, ppm_x: float, ppm_y: float) -> None:
+    """Zero out the card's own printed graphics (in place)."""
+    from .card import CARD_H_MM, CARD_W_MM, MARKER_CENTERS, MARKER_MM
+
+    def blank(x_mm, y_mm, w_mm, h_mm):
+        x0, y0 = int(x_mm * ppm_x), int(y_mm * ppm_y)
+        x1, y1 = int((x_mm + w_mm) * ppm_x), int((y_mm + h_mm) * ppm_y)
+        img[max(0, y0):y1, max(0, x0):x1] = 0
+
+    blank(0, 0, CARD_W_MM, 7); blank(0, CARD_H_MM - 7, CARD_W_MM, 7)
+    blank(0, 0, 7, CARD_H_MM); blank(CARD_W_MM - 7, 0, 7, CARD_H_MM)
+    for cx, cy in MARKER_CENTERS.values():
+        s = MARKER_MM + 8
+        blank(cx - s / 2, cy - s / 2, s, s)
+    blank(65, CARD_H_MM - 24, 75, 17)  # scale bar + label
+    blank(48, 4, 115, 17)  # title text strip
+
+
+def segment_tap(rect_bgr: np.ndarray, taps_px: list[tuple[int, int]],
+                eraser_px: list[tuple[int, int]] | None = None) -> np.ndarray | None:
+    """GrabCut segmentation seeded by user taps on the part (tap-to-select).
+
+    taps = sure-foreground discs, eraser taps = sure-background discs,
+    image border ring = sure background. Returns a binary mask in
+    rectified space, or None on failure (caller keeps the old mask).
+    """
+    from .card import CARD_H_MM, CARD_W_MM
+
+    if not taps_px:
+        return None
+    h_px, w_px = rect_bgr.shape[:2]
+    ppm_x, ppm_y = w_px / CARD_W_MM, h_px / CARD_H_MM
+    gray = cv2.cvtColor(rect_bgr, cv2.COLOR_BGR2GRAY)
+    _blank_card_graphics(gray, ppm_x, ppm_y)  # seeds can't leak into graphics
+    fg = np.zeros((h_px, w_px), np.uint8)
+    for tx, ty in taps_px:
+        cv2.circle(fg, (int(tx), int(ty)), 40, 255, -1)
+    seed = np.full((h_px, w_px), cv2.GC_PR_BGD, np.uint8)
+    seed[fg > 0] = cv2.GC_FGD
+    seed[6:-6, 6:-6] = np.where(seed[6:-6, 6:-6] == cv2.GC_FGD,
+                                cv2.GC_FGD, seed[6:-6, 6:-6])
+    # border ring = sure background (but never override a tap)
+    ring = np.zeros((h_px, w_px), np.uint8)
+    ring[:6, :] = ring[-6:, :] = ring[:, :6] = ring[:, -6:] = 255
+    seed[(ring > 0) & (fg == 0)] = cv2.GC_BGD
+    seed[gray == 0] = np.where(seed[gray == 0] == cv2.GC_FGD,
+                               cv2.GC_FGD, cv2.GC_BGD)
+    for ex, ey in (eraser_px or []):
+        cv2.circle(seed, (int(ex), int(ey)), 30, cv2.GC_BGD, -1)
+    bgd, fgd = np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64)
+    try:
+        cv2.grabCut(rect_bgr, seed, None, bgd, fgd, 5, cv2.GC_INIT_WITH_MASK)
+    except cv2.error:
+        return None
+    out = (((seed == cv2.GC_FGD) | (seed == cv2.GC_PR_FGD)).astype(np.uint8)
+           * 255)
+    # re-cut through-holes: they show card-white through the metal, i.e.
+    # small ROUND bright enclosures inside the GrabCut area. (Large or
+    # irregular bright = glare blowout, stays part.) Threshold mode finds
+    # holes as mask children; GrabCut's solid mask needs this explicit pass.
+    gray = cv2.cvtColor(rect_bgr, cv2.COLOR_BGR2GRAY)
+    t_hole, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    bright_in = ((gray >= t_hole) & (out > 0)).astype(np.uint8) * 255
+    nlab, lab, stats, _ = cv2.connectedComponentsWithStats(bright_in)
+    ppm = (ppm_x + ppm_y) / 2
+    for i in range(1, nlab):
+        area_px = stats[i, cv2.CC_STAT_AREA]
+        d_eq = 2 * (area_px / 3.14159) ** 0.5 / ppm
+        if not 1.6 <= d_eq <= 15.0:
+            continue
+        comp = (lab == i).astype(np.uint8) * 255
+        cnts, _ = cv2.findContours(comp, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+        if cnts and _circularity(max(cnts, key=cv2.contourArea)) >= 0.6:
+            out[lab == i] = 0
+    _blank_card_graphics(out, ppm_x, ppm_y)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, kernel)
+    out = cv2.morphologyEx(out, cv2.MORPH_OPEN, kernel)
+    return out
 
 
 def _circularity(contour) -> float:
@@ -201,20 +271,46 @@ def measure_mask(mask: np.ndarray, px_per_mm: float,
 
 
 def measure_photo(img_bgr: np.ndarray, mask: np.ndarray | None = None,
-                  thresh: int = 0):
+                  thresh: int = 0, taps: list[tuple[int, int]] | None = None,
+                  eraser: list[tuple[int, int]] | None = None):
     """Full path: photo -> (spec, rectified_img, px_per_mm, info).
 
     thresh <= 0 (default) = Otsu auto-threshold per photo.
+    taps/eraser are in ORIGINAL photo pixels; they are warped into
+    rectified space with the same homography as the image, then GrabCut
+    refines the mask from them. Tap mode replaces thresholding.
     """
     H, ids = detect_card(img_bgr)
     if H is None:
         return None, None, 0.0, {"card_markers": ids,
                                  "error": "Calibration card not found (need all 4 markers)."}
     rect, ppm = rectify(img_bgr, H)
-    if mask is None:
+    fragments = 1
+    if taps:
+        import numpy as _np
+        scale = _np.diag([ppm, ppm, 1.0]) @ H
+        taps_rect = []
+        for tx, ty in taps:
+            p = scale @ _np.array([tx, ty, 1.0])
+            taps_rect.append((float(p[0] / p[2]), float(p[1] / p[2])))
+        er_rect = []
+        for ex, ey in (eraser or []):
+            p = scale @ _np.array([ex, ey, 1.0])
+            er_rect.append((float(p[0] / p[2]), float(p[1] / p[2])))
+        mask = segment_tap(rect, taps_rect, er_rect)
+        thresh_used = thresh
+        if mask is None or int((mask > 0).sum()) < 50:
+            return None, None, 0.0, {
+                "card_markers": ids,
+                "error": ("Tap segmentation found nothing — tap on the metal "
+                          "face, not on holes or shadows."),
+                "mask": mask if mask is not None else _np.zeros(rect.shape[:2],
+                                                                 dtype=_np.uint8),
+                "rect": rect, "thresh_used": thresh_used}
+    elif mask is None:
         mask, thresh_used, fragments = segment_fallback(rect, thresh=thresh)
     else:
-        thresh_used, fragments = thresh, 1
+        thresh_used = thresh
         mask = cv2.warpPerspective(
             mask, np.diag([ppm, ppm, 1.0]) @ H,
             (rect.shape[1], rect.shape[0]))
