@@ -1,52 +1,54 @@
-# PartForge — engine decisions (SAM3 via Roboflow API, branch `sam3-api`)
+# PartForge — engine decisions (Meta SAM 3.1, branch `sam3-api`)
 
-## D1 — No local weights, no GPU server: mock with the same interface
-Checked 2026-10-30: no torch in venv, no `sam*` weights on disk, no SAM env
-vars, nothing SAM-like listening (port 8000 answers "Not Found" on
-/v1/models). Task says: build against a mock, report what's missing.
-**Missing: `API_KEY` env var (Roboflow key).** Without it every SAM call
-401s (verified with a live probe: `{"status":401,"message":"Unauthorized
-api_key"}`). `get_client()` returns `RoboflowSam3` when `API_KEY` is set,
-else `MockSam3`. One env var flips backends, zero code changes.
+## D1 — No local weights, no GPU server: Meta Model API instead
+Checked 2026-10-30: no torch in venv, no `sam*` weights on disk, nothing
+SAM-like listening. Task: Meta `sam-3.1` on Meta Model API, no self-host.
+`MODEL_API_KEY` present in `.env` → live backend works.
 
-## D2 — Roboflow wire contract (from current docs, verified endpoint shape)
-`POST https://serverless.roboflow.com/sam3/concept_segment`
-headers `Authorization: Bearer $API_KEY`, body:
-`{"image": {"type": "base64", "value": "<b64 jpg>"},
-   "prompts": [{"type": "text", "text": "metal bracket plate"}, ...],
-   "output_prob_thresh": 0.5, "format": "polygon"}`
-Response: `{"prompt_results": [{"echo": {...}, "predictions":
-[{"confidence": f, "format": "polygon",
-   "masks": [[[x,y], ...], ...]}]}]}`. Polygon points are input-image
-pixels. Any prompt may return zero predictions (normal, not an error).
-Doc gaps: RLE payload shape is under-documented — polygon is primary,
-RLE decode left unimplemented until a real response needs it.
+## D2 — Verified wire facts (live probe, do not re-guess)
+- Base URL `https://api.meta.ai/v1`, `POST /v1/responses`, OpenAI SDK.
+- One user message: `input_text` noun phrase + `input_image` as a
+  **base64 data URL — works** (verified, no public URL needed).
+- `metadata: {"mask_encoding": "one_bit"}` → mask token `data=H,W,!payload`.
+- Non-streaming is fine for single images. Empty `output_text` = zero
+  matches (valid, e.g. prompt "part" on a side view).
+- Mask raster is **box-cropped**: H,W = the record's box size; paste the
+  decoded raster at (x1,y1)-(x2,y2), x2/y2 INCLUSIVE.
+- one_bit payload is NOT stdlib base85 (has `'`, `/`, `[` etc). Decoded
+  with `meta_sam_parser`'s own codec (`decode_mask_to_raster`).
+  Hand-rolled replay events fail lane checks — parse the real SDK stream.
+- `meta-sam-parser` 0.1.0 has NO `parse_image_stream`/`records_of_kind`:
+  use `parse_responses_stream(events, format=image_segmentation_format())`,
+  drain snapshots, then `final_result` (call it if callable, await if
+  coroutine). Records: `SegmentationBoxRecord`/`SegmentationMaskRecord`.
 
-## D3 — One SAM call per photo, all prompts at once
-`segment(photo, ["part", "hole", "slot"])` sends the image once with all
-three text prompts and returns `{prompt: [polygon, ...]}` in image pixels.
-Per-photo result cached in `ss.sam_cache[sha1(jpg)]` so measurement edits
-rebuild CAD only and never re-call the API.
+## D3 — One request per prompt, never combined
+`segment(image, prompt) -> [(box_xyxy, mask_bool_fullframe)]` in
+`partforge/sam_engine.py`. Prompts: part ladder
+("metal bracket plate" → "flat metal part on white card" →
+"rectangular bar" → "plate" → "part"), then "hole", then "slot"
+(top view only). First non-empty part result wins. Thin side bars need
+shape words ("rectangular bar"); bare "part" returns nothing on them.
+Mock runs ONLY behind `SAM_MOCK=1`; status bar shows live/mock/missing.
 
-## D4 — Mock = old engine repackaged, labeled, never trusted
-`MockSam3.segment()` = Otsu threshold + contour children, same I/O as the
-real client (dict of prompt → polygon lists). For offline dev only.
-Status bar shows `SAM3: live` vs `SAM3: mock`.
+## D4 — Shapes, never raw contours, go downstream
+`shapes.py` fits outline (RDP corners + angle/length snap), circles
+(holes), minAreaRect (slots). `PartSpec` only sees fitted values.
 
-## D5 — Polygons → fitted shapes, never raw points, downstream
-`shapes.py`: RDP → corners; Hough → lines (snap 2° → 0/90, parallel 1.5°,
-equal length 0.3 mm); minEnclosingCircle + circularity → holes;
-minAreaRect → slots. `PartSpec` only sees fitted values.
+## D5 — SAM hole masks are approximate: fit, then verify by position
+Live "hole" masks land within 1.5 mm of GT centres on synthetic but
+diameters read ~1.5 high (mask bleed). Regression checks position only;
+diameter accuracy is a user-confirmed question in the app (unchanged).
 
 ## D6 — Front view keeps its role (thickness vote), new engine
-Front "part" polygon → fitted rectangle → long side matches top W/H,
+Front part mask → fitted rectangle → long side matches top W/H,
 short side = thickness vote. `fusion.py` untouched (works on PartSpecs).
 
 ## D7 — Viewer clicks select detected shapes; edits rebuild CAD only
 Markers already carry shape ids (H1, S1, bend). SAM runs once per photo
-at Measure time (cached). All edits mutate the spec + `build_solid`.
+at Measure time (sha1 cache). All edits mutate the spec + `build_solid`.
 
 ## D8 — Debug images on disk for every view
-`debug/<role>_sam_<prompt>.png` (polygons over photo) +
-`debug/<role>_fitted.png` (fitted shapes over rectified photo).
+`debug/<role>_sam_<prompt>.png` (SAM masks over photo) +
+`debug/<role>_fitted.png` (fitted outline over rectified photo).
 Gitignored, never uploaded.
