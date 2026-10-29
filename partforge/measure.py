@@ -185,12 +185,14 @@ def segment_tap(rect_bgr: np.ndarray, taps_px: list[tuple[int, int]],
     return out
 
 
-def _segment_from_taps(img_bgr, H, ppm, taps, eraser, sam_first=True):
+def _segment_from_taps(img_bgr, H, ppm, taps, eraser, sam_first=True,
+                       auto=False):
     """Tap -> mask in RECTIFIED space. SAM 3.1 (API) first, GrabCut fallback.
 
     Returns (mask_or_None, method_name). SAM runs on the ORIGINAL photo
     (its native input); the mask is warped into rect mm-space with the
-    same homography as the image.
+    same homography as the image. auto=True: taps are auto-seeds, each
+    its own candidate object, best mask wins.
     """
     import numpy as _np
 
@@ -198,7 +200,19 @@ def _segment_from_taps(img_bgr, H, ppm, taps, eraser, sam_first=True):
     if sam_first:
         try:
             from .sam_provider import segment_points
-            got = segment_points(img_bgr, taps, eraser)
+            from .card import CARD_H_MM, CARD_W_MM
+            ih, iw = img_bgr.shape[:2]
+            # graphics zones in photo pixels: build in rect space, inverse-warp
+            gfx_rect = np.full((int(CARD_H_MM * ppm), int(CARD_W_MM * ppm)),
+                               255, np.uint8)
+            _blank_card_graphics(gfx_rect, gfx_rect.shape[1] / CARD_W_MM,
+                                 gfx_rect.shape[0] / CARD_H_MM)
+            gfx_rect = (gfx_rect == 0).astype(np.uint8) * 255  # graphics=255
+            inv = np.linalg.inv(np.diag([ppm, ppm, 1.0]) @ H)
+            card_gfx = cv2.warpPerspective(gfx_rect, inv, (iw, ih),
+                                           flags=cv2.INTER_NEAREST)
+            got = segment_points(img_bgr, taps, eraser, multi=auto,
+                                 card_mask=card_gfx)
         except Exception:
             got = None
         if got is not None:
@@ -311,15 +325,68 @@ def measure_mask(mask: np.ndarray, px_per_mm: float,
                     source="measured", offset_mm=[round(minx, 2), round(miny, 2)])
 
 
+def propose_taps(img_bgr: np.ndarray, n: int = 3) -> list[tuple[int, int]]:
+    """Auto-seed taps for SAM: dark, low-saturation blobs = bare metal.
+
+    Returns up to n tap points in ORIGINAL photo pixels, largest blob
+    first. These are proposals, not truth — SAM decides the boundary,
+    and the guards + user taps correct it.
+    """
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    sat = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)[:, :, 1]
+    cand = ((gray < 150) & (sat < 90)).astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
+    cand = cv2.morphologyEx(cand, cv2.MORPH_CLOSE, kernel)
+    nlab, _lab, stats, cent = cv2.connectedComponentsWithStats(cand)
+    h, w = gray.shape
+    frame_area = h * w
+    ranked = []
+    for i in range(1, nlab):
+        area = stats[i, cv2.CC_STAT_AREA]
+        # skip specks and frame-spanning blobs (shadows, table, card edge)
+        if area < 0.0005 * frame_area or area > 0.25 * frame_area:
+            continue
+        x, y, cw, ch = (stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP],
+                        stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT])
+        # skip anything touching the frame edge (table/floor, not the part)
+        if x <= 2 or y <= 2 or x + cw >= w - 2 or y + ch >= h - 2:
+            continue
+        ranked.append((area, (x, y, cw, ch)))
+    ranked.sort(reverse=True)
+    taps: list[tuple[int, int]] = []
+    comp = None
+    for _, (x, y, cw, ch) in ranked:
+        if comp is None:
+            # lazily build the component map once, only if needed
+            gray2 = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+            sat2 = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)[:, :, 1]
+            cand2 = ((gray2 < 150) & (sat2 < 90)).astype(np.uint8) * 255
+            kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
+            cand2 = cv2.morphologyEx(cand2, cv2.MORPH_CLOSE, kernel2)
+            _, comp, _, _ = cv2.connectedComponentsWithStats(cand2)
+        # 3x3 interior grid: part faces and shadows in one blob each get taps
+        for gx in (0.25, 0.5, 0.75):
+            for gy in (0.25, 0.5, 0.75):
+                px, py = int(x + cw * gx), int(y + ch * gy)
+                if comp[py, px] == 0:
+                    continue
+                if all(abs(px - tx) + abs(py - ty) > 25 for tx, ty in taps):
+                    taps.append((px, py))
+        if len(taps) >= 9:
+            break
+    return taps[:9]
+
+
 def measure_photo(img_bgr: np.ndarray, mask: np.ndarray | None = None,
                   thresh: int = 0, taps: list[tuple[int, int]] | None = None,
                   eraser: list[tuple[int, int]] | None = None,
                   sam_first: bool = True):
     """Full path: photo -> (spec, rectified_img, px_per_mm, info).
 
-    thresh <= 0 (default) = Otsu auto-threshold per photo.
-    taps/eraser are in ORIGINAL photo pixels.
-    Tap mode: SAM 3.1 (API) first when sam_first, GrabCut offline fallback.
+    SAM 3.1 is the primary engine: explicit taps go straight to SAM;
+    without taps, propose_taps() seeds SAM automatically. Classical Otsu
+    threshold is the offline fallback (SAM unconfigured/failed/rejected),
+    then GrabCut for tap mode. thresh <= 0 = Otsu auto-threshold.
     """
     H, ids = detect_card(img_bgr)
     if H is None:
@@ -328,27 +395,39 @@ def measure_photo(img_bgr: np.ndarray, mask: np.ndarray | None = None,
     rect, ppm = rectify(img_bgr, H)
     fragments = 1
     seg_method = "threshold"
+    auto_taps: list = []
+    if not taps and mask is None and sam_first:
+        auto_taps = propose_taps(img_bgr)
+        if auto_taps:
+            taps = auto_taps
     if taps:
         import numpy as _np
         mask, seg_method = _segment_from_taps(img_bgr, H, ppm, taps, eraser,
-                                              sam_first)
+                                              sam_first, auto=bool(auto_taps))
         thresh_used = thresh
         if mask is None or int((mask > 0).sum()) < 50:
-            return None, None, 0.0, {
-                "card_markers": ids,
-                "error": ("Tap segmentation found nothing — tap on the metal "
-                          "face, not on holes or shadows."),
-                "mask": mask if mask is not None else _np.zeros(rect.shape[:2],
-                                                                 dtype=_np.uint8),
-                "rect": rect, "thresh_used": thresh_used,
-                "method": seg_method}
-    elif mask is None:
-        mask, thresh_used, fragments = segment_fallback(rect, thresh=thresh)
-    else:
-        thresh_used = thresh
-        mask = cv2.warpPerspective(
-            mask, np.diag([ppm, ppm, 1.0]) @ H,
-            (rect.shape[1], rect.shape[0]))
+            if auto_taps and not eraser:
+                # auto-seed failed: fall through to classical, don't refuse
+                taps = None
+                seg_method = "threshold"
+                mask = None
+            else:
+                return None, None, 0.0, {
+                    "card_markers": ids,
+                    "error": ("Tap segmentation found nothing — tap on the metal "
+                              "face, not on holes or shadows."),
+                    "mask": mask if mask is not None else _np.zeros(rect.shape[:2],
+                                                                     dtype=_np.uint8),
+                    "rect": rect, "thresh_used": thresh_used,
+                    "method": seg_method}
+    if not taps or mask is None:
+        if mask is None and not taps:
+            mask, thresh_used, fragments = segment_fallback(rect, thresh=thresh)
+        elif mask is not None and not taps:
+            thresh_used = thresh
+            mask = cv2.warpPerspective(
+                mask, np.diag([ppm, ppm, 1.0]) @ H,
+                (rect.shape[1], rect.shape[0]))
     spec = measure_mask(mask, ppm)
     if spec is None:
         return None, None, 0.0, {
