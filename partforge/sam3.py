@@ -85,8 +85,10 @@ class RoboflowSam3:
 class MockSam3:
     """Offline stand-in: classical CV behind the SAM3 interface.
 
-    'part' -> largest interior blob; 'hole'/'slot' -> enclosed blobs
-    classified by circularity/elongation. Same I/O as RoboflowSam3.
+    Works in RECTIFIED card space would be ideal, but the mock only sees
+    the raw photo — so it restricts itself to the card quad: detect the
+    ArUco markers, warp to card space, run the old threshold path there,
+    warp polygons back to photo pixels. Same I/O as RoboflowSam3.
     Dev-only: results are NOT trustworthy measurements.
     """
 
@@ -96,55 +98,59 @@ class MockSam3:
 
     def segment(self, img_bgr: np.ndarray,
                 prompts: list[str]) -> dict[str, list[np.ndarray]]:
+        from .card import CARD_H_MM, CARD_W_MM, detect_card
+        from .measure import _blank_card_graphics, segment_fallback
+
         h, w = img_bgr.shape[:2]
         out: dict[str, list[np.ndarray]] = {p: [] for p in prompts}
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        _, t = cv2.threshold(gray, 0, 255,
-                             cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        dark = ((gray < max(60.0, t - 12.0))).astype(np.uint8) * 255
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-        dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, kernel)
-        cnts, _ = cv2.findContours(dark, cv2.RETR_EXTERNAL,
-                                   cv2.CHAIN_APPROX_SIMPLE)
-        best, best_area = None, 0.0
-        for c in cnts:
-            x, y, cw, ch = cv2.boundingRect(c)
-            if x <= 2 or y <= 2 or x + cw >= w - 2 or y + ch >= h - 2:
-                continue
-            a = cv2.contourArea(c)
-            if a > best_area:
-                best, best_area = c, a
-        if best is None or best_area < 50:
+        H, _ids = detect_card(img_bgr)
+        if H is None:
             return out
+        ppm = 8.0
+        rect = cv2.warpPerspective(
+            img_bgr, np.diag([ppm, ppm, 1.0]) @ H,
+            (int(CARD_W_MM * ppm), int(CARD_H_MM * ppm)))
+        mask, _t, _kept = segment_fallback(rect, thresh=0)
+        # part polygon: largest root contour in rect space -> photo pixels
+        cnts, hier = cv2.findContours(mask, cv2.RETR_TREE,
+                                      cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts or hier is None:
+            return out
+        hier = hier[0]
+        roots = [i for i, hh in enumerate(hier) if hh[3] == -1]
+        if not roots:
+            return out
+        outer = max(roots, key=lambda i: cv2.contourArea(cnts[i]))
+        if cv2.contourArea(cnts[outer]) < 50:
+            return out
+        inv = np.linalg.inv(np.diag([ppm, ppm, 1.0]) @ H)
+
+        def back(pts):
+            p = np.hstack([pts.reshape(-1, 2),
+                           np.ones((len(pts.reshape(-1, 2)), 1))])
+            q = (inv @ p.T).T
+            return (q[:, :2] / q[:, 2:3]).reshape(-1, 2)
+
         if "part" in prompts:
-            out["part"] = [best.reshape(-1, 2).astype(np.float64)]
+            out["part"] = [back(cnts[outer].reshape(-1, 2))]
         if "hole" in prompts or "slot" in prompts:
-            inv = cv2.bitwise_not(
-                cv2.compare(gray, int(max(60.0, t - 12.0)), cv2.CMP_LT))
-            part_mask = np.zeros((h, w), np.uint8)
-            cv2.drawContours(part_mask, [best], -1, 255, -1)
-            inside = cv2.bitwise_and(inv, inv, mask=part_mask)
-            nlab, lab, _, _ = cv2.connectedComponentsWithStats(inside)
-            for i in range(1, nlab):
-                m = (lab == i).astype(np.uint8) * 255
-                ccs, _ = cv2.findContours(m, cv2.RETR_EXTERNAL,
-                                          cv2.CHAIN_APPROX_SIMPLE)
-                if not ccs:
-                    continue
-                c = max(ccs, key=cv2.contourArea)
+            child = hier[outer][2]
+            while child != -1:
+                c = cnts[child]
                 per = cv2.arcLength(c, True)
-                if per <= 0:
-                    continue
-                circ = 4 * np.pi * cv2.contourArea(c) / (per * per)
-                rw, rh = cv2.minAreaRect(c)[1]
-                long_, short_ = max(rw, rh), min(rw, rh)
-                poly = c.reshape(-1, 2).astype(np.float64)
-                if circ >= 0.6 and short_ >= 3.0:
-                    if "hole" in prompts:
-                        out["hole"].append(poly)
-                elif short_ >= 3.0 and long_ > 1.55 * short_:
-                    if "slot" in prompts:
-                        out["slot"].append(poly)
+                area = cv2.contourArea(c)
+                if per > 0 and area / (ppm * ppm) > 2.0:
+                    circ = 4 * np.pi * area / (per * per)
+                    rw, rh = cv2.minAreaRect(c)[1]
+                    long_, short_ = max(rw, rh) / ppm, min(rw, rh) / ppm
+                    poly = back(c.reshape(-1, 2))
+                    if circ >= 0.6 and short_ >= 1.6:
+                        if "hole" in prompts:
+                            out["hole"].append(poly)
+                    elif short_ >= 1.6 and long_ > 1.55 * short_:
+                        if "slot" in prompts:
+                            out["slot"].append(poly)
+                child = hier[child][0]
         return out
 
 

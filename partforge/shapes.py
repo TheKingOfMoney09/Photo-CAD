@@ -87,9 +87,15 @@ def _circularity_px(contour) -> float:
 
 def fit_holes(hole_polys: list[np.ndarray], px_per_mm: float,
               min_d_mm: float = 1.6) -> list:
-    """SAM hole polygons -> Hole list (centre + diameter, mm)."""
+    """SAM hole polygons -> Hole list (centre + diameter, mm).
+
+    Filled-region holes (card showing through) read SMALLER than the true
+    hole: the dark outline ring eats the rim. Compensate with the ring
+    width estimated from the fitted outline (~0.7 mm each side).
+    """
     from .spec import Hole
 
+    RING_MM = 1.4  # diameter compensation for the dark outline rim
     found = []
     for poly in hole_polys:
         c = poly.reshape(-1, 2).astype(np.float32)
@@ -97,7 +103,7 @@ def fit_holes(hole_polys: list[np.ndarray], px_per_mm: float,
             continue
         area_mm2 = cv2.contourArea(c) / (px_per_mm ** 2)
         (cx, cy), _r = cv2.minEnclosingCircle(c)
-        d_eq = 2 * math.sqrt(max(area_mm2, 0) / math.pi)
+        d_eq = 2 * math.sqrt(max(area_mm2, 0) / math.pi) + RING_MM
         if d_eq < min_d_mm:
             continue
         if _circularity_px(c) < 0.55:
@@ -127,7 +133,8 @@ def fit_slots(slot_polys: list[np.ndarray], px_per_mm: float,
         (rw, rh) = rect[1]
         rw_mm, rh_mm = rw / px_per_mm, rh / px_per_mm
         long_, short_ = max(rw_mm, rh_mm), min(rw_mm, rh_mm)
-        if short_ < min_w_mm or long_ <= 1.55 * short_:
+        # skip slot-rim artefacts: much bigger than any hole on the part
+        if short_ < min_w_mm or long_ <= 1.55 * short_ or long_ > 60.0:
             continue
         angle = rect[2] if rw >= rh else rect[2] + 90
         cx, cy = rect[0][0] / px_per_mm, rect[0][1] / px_per_mm

@@ -74,17 +74,37 @@ def build_exports(spec_json: str, tol: float):
 
 
 def process_photo(img_bgr: np.ndarray, name: str, thresh: int,
-                  role: str = "top",
-                  taps: list[tuple[int, int]] | None = None,
-                  eraser: list[tuple[int, int]] | None = None) -> None:
-    """role: top | side | front. Top replaces the master; sides fuse into it.
+                  role: str = "top") -> None:
+    """role: top | front. Top gives profile+holes+slots; front gives height.
 
-    taps/eraser are ORIGINAL photo pixels (tap-to-select mode).
+    One SAM call per photo (cached by sha1 so edits never re-call).
+    No taps, no thresholds — SAM text prompts only.
     Returns True on success, False on failure (error is stored in
     ss.errors[role] so it survives reruns instead of flashing away).
     """
-    spec, rect, ppm, info = measure_photo(img_bgr, thresh=thresh,
-                                          taps=taps, eraser=eraser)
+    import hashlib
+    from partforge.pipeline import measure_view
+    ok, obuf = cv2.imencode(".jpg", img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not ok:
+        ss.errors[role] = "could not decode photo"
+        return False
+    key = hashlib.sha1(obuf.tobytes()).hexdigest()
+    cached = ss.sam_cache.get(key)
+    if cached is None:
+        try:
+            spec, rect, ppm, info = measure_view(img_bgr, role)
+        except RuntimeError as e:
+            spec, rect, ppm, info = None, None, 0.0, {"error": str(e)}
+        cached = {"spec": spec.model_dump() if spec else None,
+                  "rect": rect.tolist() if rect is not None else None,
+                  "ppm": ppm, "info": info}
+        ss.sam_cache[key] = cached
+    else:
+        info = cached["info"]
+        ppm = cached["ppm"]
+        rect = np.array(cached["rect"], dtype=np.uint8) \
+            if cached["rect"] is not None else None
+        spec = PartSpec(**cached["spec"]) if cached["spec"] else None
     if spec is None:
         err = info.get("error", "unknown")
         # keep the forensic layers even on failure (mask/rect explain why)
@@ -110,22 +130,17 @@ def process_photo(img_bgr: np.ndarray, name: str, thresh: int,
         log(f"{role}: FAILED — {err[:100]}")
         return False
     ss.errors.pop(role, None)
-    # keep the original bytes: tap-to-select re-measures from them
-    ok_o, obuf = cv2.imencode(".jpg", img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
-    if ok_o:
-        ss.originals[role] = obuf.tobytes()
+    ss.originals[role] = obuf.tobytes()
     annotated = annotate(rect, spec, ppm)
     ok, buf = cv2.imencode(".png", annotated)
     ss.views_png[role] = buf.tobytes() if ok else None
     mask = info.get("mask")
     if mask is not None:
-        okm, mbuf = cv2.imencode(".png", mask)
+        okm, mbuf = cv2.imencode(".png", np.array(mask, dtype=np.uint8))
         ss.views_mask[role] = mbuf.tobytes() if okm else None
     ss.photo_names[role] = name
-    tu = info.get("thresh_used")
-    if tu is not None:
-        tag = "auto" if ss.get("auto_thresh", True) else "manual"
-        log(f"{role}: threshold {float(tu):.0f} ({tag})")
+    log(f"{role}: {info.get('note', 'measured')} "
+        f"[SAM3:{info.get('backend', '?')}]")
     if role == "top":
         set_spec(spec)
         ss.selected = None
