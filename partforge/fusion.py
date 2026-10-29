@@ -1,15 +1,12 @@
 """Multi-view fusion.
 
-Top is the master: outline, holes, slots. Side/front are secondary views of
-the SAME part in a different resting pose on the card:
+Top is the master: outline, holes, slots. Front is the secondary view of
+the SAME part standing on edge: the long silhouette dimension must match
+top W or H; the short one is a **thickness vote** (measured, not guessed).
+A bracket resting on one leg (front) shows an L-profile kink which proposes
+type=bracket + bend position/angle, always as a confirmable question.
 
-- plate standing on its LONG edge (side) or SHORT edge (front): the long
-  silhouette dimension must match top W or H; the short one is a
-  **thickness vote** (measured, not guessed).
-- bracket resting on one leg (side): an L-profile kink proposes
-  type=bracket + bend position/angle, always as a confirmable question.
-
-Guards are honest: non-rectangular side profiles and dimension mismatches
+Guards are honest: non-rectangular front profiles and dimension mismatches
 produce warnings, never numbers.
 """
 from __future__ import annotations
@@ -101,7 +98,7 @@ def fuse(top: PartSpec, views: dict[str, PartSpec]) -> dict[str, str]:
                 f"{len(top.holes)} holes, {len(top.slots)} slots")}
     votes: list[float] = []
     roles: dict[str, float] = dict(top.thickness_vote_roles or {})
-    for role in ("side", "front"):
+    for role in ("front", "side"):
         v = views.get(role)
         if v is None or not v.outline_mm:
             continue

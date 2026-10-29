@@ -13,7 +13,8 @@ import streamlit as st
 
 from partforge import cad, meta_api, ui
 from partforge.fusion import fuse
-from partforge.measure import annotate, measure_photo
+from partforge.measure import annotate
+from partforge.pipeline import measure_view
 from partforge.spec import Bend, Hole, PartSpec, Slot, rectangle_spec
 from partforge.synthetic import make_synthetic_bracket_side, \
     make_synthetic_photo, make_synthetic_side
@@ -272,7 +273,7 @@ if cap_open:
                 log("Blank 80x40x3 plate created — edit freely")
                 st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
-    tol = ss.get("pf_tol", 0.2)
+if "tol" not in dir():
     tol = ss.get("pf_tol", 0.2)
 
 # ---------------------------------------------------------------- persistent error panel
