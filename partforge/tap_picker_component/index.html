@@ -4,8 +4,10 @@
 <meta charset="utf-8">
 <style>
   html, body { margin:0; padding:0; background:#0e1117; }
-  #wrap { position:relative; display:inline-block; cursor:crosshair; }
-  #wrap img { display:block; max-width:100%; }
+  #wrap { position:relative; display:inline-block; cursor:crosshair;
+    z-index:1; }
+  #wrap img { display:block; max-width:100%; user-select:none;
+    -webkit-user-select:none; -webkit-user-drag:none; }
   .tap { position:absolute; width:14px; height:14px; margin:-7px 0 0 -7px;
          border-radius:50%; border:2px solid #fff; pointer-events:none; }
   .tap.fg { background:rgba(245,158,11,.9); }
@@ -33,6 +35,7 @@ function sendValue() {
 }
 function ready() {
   window.parent.postMessage({isStreamlitMessage: true, type: "streamlit:componentReady", apiVersion: 1}, "*");
+  window.parent.postMessage({isStreamlitMessage: true, type: "streamlit:setFrameHeight", height: 640}, "*");
 }
 function draw() {
   document.querySelectorAll('.tap').forEach(e => e.remove());
@@ -53,6 +56,16 @@ document.getElementById('bFg').onclick = (e) => { mode = "fg"; e.target.classLis
 document.getElementById('bBg').onclick = (e) => { mode = "bg"; e.target.classList.add('on'); document.getElementById('bFg').classList.remove('on'); };
 document.getElementById('bClear').onclick = () => { taps = []; eraser = []; draw(); sendValue(); };
 document.getElementById('img').addEventListener('click', (e) => {
+  e.preventDefault(); e.stopPropagation();
+  const img = document.getElementById('img');
+  const r = img.getBoundingClientRect();
+  const x = Math.round((e.clientX - r.left) / r.width * img.naturalWidth);
+  const y = Math.round((e.clientY - r.top) / r.height * img.naturalHeight);
+  (mode === "fg" ? taps : eraser).push([x, y]);
+  draw(); sendValue();
+});
+document.getElementById('wrap').addEventListener('click', (e) => {
+  if (e.target.id === 'img') return;  // img handler already ran
   const img = document.getElementById('img');
   const r = img.getBoundingClientRect();
   const x = Math.round((e.clientX - r.left) / r.width * img.naturalWidth);
