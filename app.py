@@ -13,8 +13,7 @@ import streamlit as st
 
 from partforge import cad, ui
 from partforge.fusion import fuse
-from partforge.measure import annotate
-from partforge.pipeline import measure_view
+from partforge.pipeline import annotate, measure_view
 from partforge.spec import Bend, Hole, PartSpec, Slot, rectangle_spec
 from partforge.synthetic import make_synthetic_bracket_side, \
     make_synthetic_photo, make_synthetic_side

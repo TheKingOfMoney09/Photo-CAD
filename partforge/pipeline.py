@@ -64,6 +64,26 @@ def _backend() -> str:
     return "live" if os.environ.get("MODEL_API_KEY", "").strip() else "missing"
 
 
+def annotate(rect_bgr: np.ndarray, spec, px_per_mm: float) -> np.ndarray:
+    """Draw fitted outline/holes/slots back onto the rectified photo."""
+    out = rect_bgr.copy()
+    ox = (spec.offset_mm[0] * px_per_mm, spec.offset_mm[1] * px_per_mm)
+    pts = np.array([[(p[0] * px_per_mm + ox[0]), (p[1] * px_per_mm + ox[1])]
+                    for p in spec.outline_mm], dtype=np.int32)
+    cv2.polylines(out, [pts], True, (0, 200, 0), 3)
+    for h in spec.holes:
+        c = (int(h.x * px_per_mm + ox[0]), int(h.y * px_per_mm + ox[1]))
+        cv2.circle(out, c, max(3, int(h.d / 2 * px_per_mm)), (0, 0, 255), 3)
+        cv2.putText(out, f"{h.id} d{h.d:.1f}", (c[0] + 8, c[1] - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+    for s in spec.slots:
+        c = (int(s.cx * px_per_mm + ox[0]), int(s.cy * px_per_mm + ox[1]))
+        cv2.circle(out, c, max(3, int(s.width / 2 * px_per_mm)), (255, 128, 0), 3)
+        cv2.putText(out, f"{s.id} {s.length:.0f}x{s.width:.1f}", (c[0] + 8, c[1] - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 128, 0), 2)
+    return out
+
+
 def measure_view(img_bgr: np.ndarray, role: str):
     """Run SAM 3.1 on one photo, fit shapes, return a PartSpec (or None)."""
     H, ids = detect_card(img_bgr)
