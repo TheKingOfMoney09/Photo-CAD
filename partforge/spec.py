@@ -32,11 +32,12 @@ class Slot(BaseModel):
 
 
 class Bend(BaseModel):
-    position_mm: float  # distance from one end along the flat pattern
+    """Detected bend state. Set ONLY by partforge/bends.py, never by UI."""
+    position_mm: float = 0.0  # bend line position along the part, mm
     angle_deg: float = 90.0
     radius_mm: float = 2.0
     axis: str = "y"  # bend line runs parallel to this spec axis
-    confidence: float = 0.6
+    confidence: float = 0.0  # detector confidence (bend_confidence)
 
 
 class Question(BaseModel):
@@ -126,8 +127,10 @@ class PartSpec(BaseModel):
                 self.bend.confidence < 1.0:
             qs.append(Question(
                 id="bend_angle_confirm", field="bend.angle_deg",
-                text=f"Side view suggests a {self.bend.angle_deg:.0f}° bend at "
-                     f"{self.bend.position_mm:.1f} mm. Confirm the angle?",
+                text=f"Detector found a {self.bend.angle_deg:.0f}° bend at "
+                     f"{self.bend.position_mm:.1f} mm "
+                     f"(confidence {self.bend.confidence:.2f}). "
+                     f"Confirm the angle?",
                 kind="number", suggested=self.bend.angle_deg))
         for hole in self.holes:
             near = [s for s in STANDARD_HOLES if abs(s - hole.d) <= 0.45]
@@ -155,9 +158,12 @@ class PartSpec(BaseModel):
                          f"low confidence. Confirm width?",
                     kind="number", suggested=slot.width))
         if self.type == "bracket" and self.bend is None:
+            # detector found no bend geometry yet (e.g. side view missing):
+            # ask once, do not invent a position.
             qs.append(Question(
                 id="bend_angle", field="bend.angle_deg",
-                text="This looks like a bent bracket. What is the bend angle?",
+                text="Bend detected but the side view is missing. "
+                     "What is the bend angle?",
                 kind="number", suggested=90.0))
         return qs
 
@@ -181,8 +187,9 @@ class PartSpec(BaseModel):
                     slot.width = value
                     slot.confidence = 1.0
         elif f == "bend.angle_deg":
+            # user confirms/corrects the ANGLE only; position stays detected.
             if self.bend is None:
-                self.bend = Bend(position_mm=self.width_mm / 2, angle_deg=value)
+                self.bend = Bend(angle_deg=value)
             else:
                 self.bend.angle_deg = value
                 self.bend.confidence = 1.0

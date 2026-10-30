@@ -460,45 +460,6 @@ with tab_review:
                     e.number_input("wid", 0.5, 100.0, float(s.width), 0.1, key=f"slot_{s.id}_width",
                                    on_change=cb_slot, args=(s.id, "width"))
 
-            # ----- bracket
-            st.markdown("#### Bracket")
-            is_bracket = st.checkbox("This part has a bend", value=(spec.type == "bracket"),
-                                     key="view_is_bracket")
-            if is_bracket and spec.type != "bracket":
-                spec.type = "bracket"
-                if spec.bend is None:
-                    spec.bend = Bend(position_mm=round(spec.width_mm / 2, 1))
-                save(spec); st.rerun()
-            if not is_bracket and spec.type != "plate":
-                spec.type = "plate"
-                save(spec); st.rerun()
-            if spec.type == "bracket":
-                b = spec.bend or Bend(position_mm=round(spec.width_mm / 2, 1))
-                spec.bend = b
-                sel_b = ss.selected == "bend"
-                if st.button(f"{'🔴' if sel_b else '🟣'} Bend — {b.angle_deg:.0f}° at {b.position_mm:.1f} mm",
-                             key="pick_bend", use_container_width=True):
-                    ss.selected = "bend"; st.rerun()
-                if sel_b or True:
-                    p1, p2, p3 = st.columns(3)
-                    pos = p1.number_input("position mm", 0.5, 2000.0, float(b.position_mm), 0.5,
-                                          key="dim_bend_pos")
-                    ang = p2.number_input("angle °", 15.0, 175.0, float(b.angle_deg), 1.0,
-                                          key="dim_bend_ang")
-                    ax = p3.selectbox("bend line ∥", ["y", "x"],
-                                      index=0 if b.axis == "y" else 1, key="dim_bend_ax")
-                    if st.button("Apply bend", key="dim_bend_apply"):
-                        b.position_mm, b.angle_deg, b.axis = float(pos), float(ang), ax
-                        try:
-                            cad.build_solid(spec)
-                            b.confidence = 1.0
-                            save(spec); st.rerun()
-                        except ValueError as e:
-                            st.error(str(e))
-                note = getattr(cad.build_solid(spec), "_partforge_note", "")
-                if note and "1 on folded" not in note and "0 on folded" not in note:
-                    st.caption(note)
-
             ac1, ac2 = st.columns(2)
             if ac1.button("＋ Add hole"):
                 nid = f"H{len(spec.holes) + 1}"

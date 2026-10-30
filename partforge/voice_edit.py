@@ -51,6 +51,8 @@ def parse_edit_text(text: str, spec) -> dict | None:
 
 
 def apply_edit(spec, edit: dict) -> str:
+    from .spec import Bend
+
     f, v = edit["field"], edit["value"]
     if f == "thickness_mm":
         spec.thickness_mm = v
@@ -60,13 +62,13 @@ def apply_edit(spec, edit: dict) -> str:
             if h.id == hid:
                 h.d = v
                 h.confidence = 1.0
-    elif f.startswith("bend."):
+    elif f == "bend.angle_deg":
+        # voice confirms angle only; position stays detected.
         if spec.bend is None:
-            from .spec import Bend
-            spec.type = "bracket"
-            spec.bend = Bend(position_mm=spec.width_mm / 2)
-        spec.bend.angle_deg = v
-        spec.bend.confidence = 1.0
+            spec.bend = Bend(angle_deg=v)
+        else:
+            spec.bend.angle_deg = v
+            spec.bend.confidence = 1.0
     elif f == "width_mm":
         spec.rescale_outline(v, spec.height_mm)
     elif f == "height_mm":
