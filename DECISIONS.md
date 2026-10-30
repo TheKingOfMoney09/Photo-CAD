@@ -1,5 +1,20 @@
 # PartForge — engine decisions (Meta SAM 3.1, branch `sam3-api`)
 
+## D9 — Bend detection is mask-based and automatic (no checkbox)
+`partforge/bends.py`: `detect_bends({view: (rect_mask, ppm)})` returns
+`{has_bend, bend_confidence, bend_line_mm, source_views, features}`.
+Features per view mask: bbox fill, solidity (area/convex-hull),
+largest empty bbox-corner fraction, distinct thickness runs along the
+main axis. `has_bend` needs >= 2 of (fill < 0.75, solidity < 0.75,
+empty_frac > 0.30). Side/front views vote (majority); top is weak
+secondary; top-only (no side/front) caps confidence at 0.5.
+bend_line_mm = empty region's inner corner projected on the main axis,
+in mm from the bbox min. No CAD built (detection only).
+Thresholds tuned on: synthetic L (fill 0.216/solidity 0.358/empty 0.774)
+vs synthetic bar (0.952/1.0/0.0); real bracket side (0.152/0.287/0.822)
+vs real bracket front/top faces (~0.79/0.90/0.13). Flat plates read
+fill 0.95+, solidity ~1.0, empty ~0.0 — wide margins, no knife-edges.
+
 ## D1 — No local weights, no GPU server: Meta Model API instead
 Checked 2026-10-30: no torch in venv, no `sam*` weights on disk, nothing
 SAM-like listening. Task: Meta `sam-3.1` on Meta Model API, no self-host.

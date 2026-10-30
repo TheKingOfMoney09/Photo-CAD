@@ -25,9 +25,21 @@ viewer (clicks select detected shape ids), UI shell.
 - AppTest Plate demo → Review + Export tabs, zero exceptions.
 - Live server :8508 replies `ok`.
 
-## Known gaps
-- Slot prompt returns nothing on synthetic (pre-existing, both engines).
-- Bracket-side bend proposal FAILs on synthetic (pre-existing).
-- Live SAM costs per photo (3 requests top, 1-4 side/front); cache
-  prevents repeat charges on edits. Thin-view prompt ladder may need
-  one more wording round on real photos.
+## Bend test set (2026-10-30, detector `partforge/bends.py`)
+
+| photo | has_bend | conf | bend_line_mm | features (fill/solid/empty) |
+|---|---|---|---|---|
+| side (2).jpg (L profile) | true | 0.97 | 3.2 | 0.152/0.287/0.822 |
+| front (2).jpg (face) | false | 0.70 | — | 0.793/0.903/0.124 |
+| top (2).jpg (face) | false | 0.70 | — | 0.794/0.898/0.130 |
+| fused (all three) | true | 0.97 | 3.2 | src: [side] |
+| synthetic flat plate (control) | false | 0.50 | — | 0.986/0.992/0.002, top-only cap |
+| synthetic L mask (unit) | true | 0.97 | 3.0 | 0.216/0.358/0.774 |
+| synthetic bar mask (unit) | false | 0.70 | — | 0.952/1.0/0.0 |
+
+Flat control: no real flat-bracket photo on hand — control is the
+synthetic flat plate top view (fill 0.986). A real flat-plate photo on
+the card is still wanted as a second control.
+`scripts/test_bends.py`: 5/5 PASS. `scripts/demo_synthetic.py` unchanged
+(8/10, same 2 pre-existing FAILs: slot prompt, bracket-side bend — the
+old outline-kink path in fusion, separate from this detector).
