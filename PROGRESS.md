@@ -43,3 +43,20 @@ the card is still wanted as a second control.
 `scripts/test_bends.py`: 5/5 PASS. `scripts/demo_synthetic.py` unchanged
 (8/10, same 2 pre-existing FAILs: slot prompt, bracket-side bend — the
 old outline-kink path in fusion, separate from this detector).
+
+## Hole↔edge / hole↔hole dimensions — bracket `top (2).jpg` (2026-11-01)
+Measured plate 54.4×48.9 mm, 7 holes (H4 d=9.5, rest d≈5.4).
+
+Hole→edge (bbox-projected; outline is near-rectangular so ≈ true edge):
+| hole | X←left | X→right | Y←bottom | Y→top |
+|---|---|---|---|---|
+| H1 (14.3, 9.3) | 14.3 | 40.1 | 9.3 | 39.6 |
+| H2 (49.1, 9.4) | 49.1 | 5.3 | 9.4 | 39.5 |
+| H3 (29.0, 13.1) | 29.0 | 25.4 | 13.1 | 35.9 |
+| H4 (47.4, 22.1) | 47.4 | 7.0 | 22.1 | 26.8 |
+| H5 (14.2, 34.5) | 14.2 | 40.2 | 34.5 | 14.4 |
+| H6 (29.0, 31.0) | 28.9 | 25.4 | 31.0 | 17.9 |
+| H7 (48.9, 34.6) | 48.9 | 5.5 | 34.6 | 14.3 |
+
+Hole↔hole (dX / dY): H1-H2 34.8/0.1 · H1-H5 0.2/25.2 · H5-H7 34.8/0.1 ·
+H2-H7 0.2/25.2 · H3-H6 0.1/17.9 (rows/cols read square: dY≈0.1, dX≈34.8).

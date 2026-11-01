@@ -1,5 +1,20 @@
 # PartForge — engine decisions (Meta SAM 3.1, branch `sam3-api`)
 
+## D10 — Hole↔edge / hole↔hole X/Y dimensions (shape IR, no SAM re-run)
+- `DimConstraint{type:dim_xy, a:hole, b:hole|edge_*, axis:x|y, value_mm,
+  flagged}` stored in `PartSpec.dims`. Edge ids = outline bbox sides
+  (`edge_left/right/bottom/top`); non-axis segments are bbox-projected
+  and the UI labels say so.
+- `apply_dim`: hole↔edge moves the hole (edge fixed); hole↔hole moves b
+  (a fixed). Validation before mutation: outside outline / hole overlap
+  / slot overlap → "Invalid: reason", old value kept.
+- `reapply_dims` replays constraints on every rebuild/pipeline re-run;
+  unappliable ones get `flagged` set, not dropped. Viewer clicks and the
+  panel go through the existing `save(spec)` path — one build path only.
+- Viewer: plain click = primary (red), shift-click/edge-click = second
+  (green), Escape clears. Overlay draws axis-projected witness lines
+  with arrow cones + mm labels. X/Y are part axes (rectified space).
+
 ## D9 — Bend detection is mask-based and automatic (no checkbox)
 `partforge/bends.py`: `detect_bends({view: (rect_mask, ppm)})` returns
 `{has_bend, bend_confidence, bend_line_mm, source_views, features}`.

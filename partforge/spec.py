@@ -8,7 +8,7 @@ never invents them: anything uncertain becomes a Question.
 from __future__ import annotations
 
 import math
-from typing import Literal, Optional
+from typing import ClassVar, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -222,7 +222,8 @@ class PartSpec(BaseModel):
         return ", ".join(parts)
 
     # -- dimension constraints (hole↔edge, hole↔hole, X/Y) --------------------
-    EDGE_IDS = ("edge_left", "edge_right", "edge_bottom", "edge_top")
+    EDGE_IDS: ClassVar[tuple] = ("edge_left", "edge_right",
+                                 "edge_bottom", "edge_top")
 
     def _hole(self, hid: str) -> Optional[Hole]:
         for h in self.holes:
