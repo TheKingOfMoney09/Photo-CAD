@@ -19,7 +19,7 @@
 </script>
 </head>
 <body>
-<div id="app"><div id="sel"></div><div id="hint">drag to rotate - scroll to zoom - click an orange marker to edit that hole/slot, purple = bend</div></div>
+<div id="app"><div id="sel"></div><div id="hint">click hole = select (red) - shift-click 2nd hole or click near an edge = reference (green) - esc clears</div></div>
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -63,14 +63,77 @@ function build(args) {
   grid.rotation.x = Math.PI / 2; grid.position.set(cx, cy, -0.05); scene.add(grid);
 
   for (const m of args.markers) {
-    const sel = m.id === args.selected;
+    const sel = m.id === args.selected, sel2 = m.id === args.second;
     const isBend = m.id === 'bend';
     const s = new THREE.Mesh(
       new THREE.SphereGeometry(Math.max(1.6, size * 0.022), 20, 14),
-      new THREE.MeshBasicMaterial({color: sel ? 0xff4444 : (isBend ? 0xb366ff : 0xff9f1c)}));
+      new THREE.MeshBasicMaterial({color: sel ? 0xff4444 : (sel2 ? 0x4ade80 : (isBend ? 0xb366ff : 0xff9f1c))}));
     s.position.set(m.x, m.y, (args.thickness || 3) + 1.2);
     s.userData.id = m.id;
     scene.add(s); markers.push(s);
+  }
+  // ---- dimension overlay: line + arrow + label per dim ----
+  const dimGroup = new THREE.Group();
+  scene.add(dimGroup);
+  const z = (args.thickness || 3) + 2.5;
+  function arrow(p1, p2, color) {
+    const dir = new THREE.Vector3().subVectors(p2, p1);
+    const len = dir.length();
+    if (len < 0.01) return;
+    dir.normalize();
+    const g = new THREE.BufferGeometry().setFromPoints([p1, p2]);
+    dimGroup.add(new THREE.Line(g, new THREE.LineBasicMaterial({color})));
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(Math.max(0.6, size * 0.008), Math.max(1.8, size * 0.024), 10),
+      new THREE.MeshBasicMaterial({color}));
+    cone.position.copy(p2);
+    cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+    dimGroup.add(cone);
+    const cone0 = cone.clone();
+    cone0.position.copy(p1);
+    cone0.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().negate());
+    dimGroup.add(cone0);
+  }
+  function label(text, p) {
+    const cv = document.createElement('canvas');
+    const ctx2d = cv.getContext('2d');
+    ctx2d.font = 'bold 44px system-ui, sans-serif';
+    const tw = ctx2d.measureText(text).width;
+    cv.width = tw + 24; cv.height = 64;
+    const c2 = cv.getContext('2d');
+    c2.fillStyle = 'rgba(10,12,16,0.85)'; c2.fillRect(0, 0, cv.width, cv.height);
+    c2.font = 'bold 44px system-ui, sans-serif'; c2.fillStyle = '#ffd166';
+    c2.fillText(text, 12, 46);
+    const tex = new THREE.CanvasTexture(cv);
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({map: tex, depthTest: false}));
+    const sc = size * 0.055;
+    sp.scale.set(sc * cv.width / 64, sc, 1);
+    sp.position.copy(p);
+    dimGroup.add(sp);
+  }
+  const refPt = (id) => {
+    const m = (args.markers || []).find(k => k.id === id);
+    if (m) return new THREE.Vector3(m.x, m.y, z);
+    // edge ids: nearest point on the outline bbox side
+    const ol = args.outline || [];
+    if (!ol.length) return null;
+    const xs = ol.map(p => p[0]), ys = ol.map(p => p[1]);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+    if (id === 'edge_left') return new THREE.Vector3(Math.min(...xs), cy, z);
+    if (id === 'edge_right') return new THREE.Vector3(Math.max(...xs), cy, z);
+    if (id === 'edge_bottom') return new THREE.Vector3(cx, Math.min(...ys), z);
+    if (id === 'edge_top') return new THREE.Vector3(cx, Math.max(...ys), z);
+    return null;
+  };
+  for (const d of (args.dims || [])) {
+    const p1 = refPt(d.a), p2 = refPt(d.b);
+    if (!p1 || !p2) continue;
+    // axis-projected witness line: draw along the measured axis only
+    const q1 = p1.clone(), q2 = p2.clone();
+    if (d.axis === 'x') { q1.y = q2.y = (p1.y + p2.y) / 2; }
+    else { q1.x = q2.x = (p1.x + p2.x) / 2; }
+    arrow(q1, q2, 0xffd166);
+    const mid = q1.clone().add(q2).multiplyScalar(0.5); mid.z += size * 0.03;
+    label(d.label || (d.value_mm + 'mm'), mid);
   }
   document.getElementById('sel').textContent = args.selected ? ("selected: " + args.selected) : "";
   camera.position.set(cx, cy - size * 1.15, size * 0.95);
@@ -78,13 +141,31 @@ function build(args) {
   controls.update();
 
   const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
+  // click marker = select; shift-click marker = second reference;
+  // click empty space near an outline bbox side = edge reference
   renderer.domElement.addEventListener('click', (e) => {
     const r = renderer.domElement.getBoundingClientRect();
     mouse.x = ((e.clientX - r.left) / r.width) * 2 - 1;
     mouse.y = -((e.clientY - r.top) / r.height) * 2 + 1;
     ray.setFromCamera(mouse, camera);
     const hit = ray.intersectObjects(markers)[0];
-    if (hit) sendValue(hit.object.userData.id);
+    if (hit) { sendValue({click: hit.object.userData.id, shift: !!e.shiftKey}); return; }
+    // empty click: project to z=0 plane, snap to nearest bbox side
+    const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+    const pt = new THREE.Vector3();
+    if (!ray.ray.intersectPlane(plane, pt)) return;
+    const ol = args.outline || [];
+    if (!ol.length) return;
+    const xs = ol.map(p => p[0]), ys = ol.map(p => p[1]);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+    const d = [['edge_left', Math.abs(pt.x - x0)], ['edge_right', Math.abs(pt.x - x1)],
+               ['edge_bottom', Math.abs(pt.y - y0)], ['edge_top', Math.abs(pt.y - y1)]];
+    d.sort((a, b) => a[1] - b[1]);
+    const tol = Math.max(x1 - x0, y1 - y0) * 0.12;
+    if (d[0][1] < tol) sendValue({click: d[0][0], shift: true});
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') sendValue({escape: true});
   });
   renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
   currentKey = key;
