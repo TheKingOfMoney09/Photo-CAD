@@ -342,15 +342,48 @@ with tab_review:
     left, right = st.columns([1.55, 1.0])
 
     with left:
+        # dimension overlay payload: live constraints as labeled witness lines
+        overlay = []
+        for dc in spec.dims:
+            cur = spec.dim_current(dc.a, dc.b, dc.axis)
+            overlay.append({"a": dc.a, "b": dc.b, "axis": dc.axis,
+                            "value_mm": dc.value_mm,
+                            "label": f"{dc.a}↔{dc.b} {dc.axis.upper()} "
+                                     f"{cur if cur is not None else '?'}mm"
+                                     + (" ⚠" if dc.flagged else "")})
         clicked = None
         try:
             clicked = part_viewer(stl_bytes, spec, ss.selected,
+                                  second=ss.get("second"),
+                                  dims=overlay,
                                   key=f"viewer_{ss.get('viewer_reset', 0)}")
         except Exception as e:  # viewer is an enhancement; panel below always works
             st.warning(f"3D viewer unavailable ({e.__class__.__name__}). "
                        "Use the dimension diagram + panel on the right.")
-        if clicked and clicked != ss.selected:
-            ss.selected = clicked
+        if isinstance(clicked, dict) and clicked.get("escape"):
+            ss.selected, ss.second = None, None
+            st.rerun()
+        elif isinstance(clicked, dict) and clicked.get("click"):
+            cid, shift = clicked["click"], clicked.get("shift", False)
+            if not shift:
+                # plain click: new primary selection (clears second unless
+                # clicking the same hole twice, which starts a self-pair)
+                if cid == ss.selected and cid not in (None, "") and \
+                        cid.startswith("H"):
+                    ss.second = cid
+                else:
+                    ss.selected, ss.second = cid, None
+            else:
+                # shift-click / edge click: second reference
+                if cid and cid != ss.selected:
+                    if ss.selected:
+                        ss.second = cid
+                    else:
+                        ss.selected = cid
+            st.rerun()
+        elif isinstance(clicked, str) and clicked != (ss.selected or ""):
+            # legacy plain-id payload: treat as primary selection
+            ss.selected, ss.second = clicked, None
             st.rerun()
         if ss.get("show_diagram", True):
             st.image(diagram_png,
@@ -407,8 +440,66 @@ with tab_review:
 
             # ----- dimensions
             st.markdown("### 📐 Dimensions (live)")
-            st.caption("Click a marker in the 3D viewer, or pick a dimension here. "
-                       "The model rebuilds on every change.")
+            st.caption("Click a hole in the 3D viewer, then shift-click a "
+                       "second hole or click near an edge. Edit X/Y below — "
+                       "the model rebuilds, SAM never re-runs.")
+            # ----- hole↔edge / hole↔hole dimension panel -----
+            sel, sec = ss.get("selected"), ss.get("second")
+            hole_ids = {h.id for h in spec.holes}
+            if sel in hole_ids:
+                st.markdown(f"**Reference A: {sel}** "
+                            f"({spec._hole(sel).x:.1f}, {spec._hole(sel).y:.1f})")
+                # nearest edges for the primary selection
+                minx, miny, maxx, maxy = spec._bbox()
+                hx, hy = spec._hole(sel).x, spec._hole(sel).y
+                st.caption(f"X from edges: left {hx - minx:.1f} / "
+                           f"right {maxx - hx:.1f} mm · Y from edges: bottom "
+                           f"{hy - miny:.1f} / top {maxy - hy:.1f} mm "
+                           f"(bbox-projected)")
+                if sec and (sec in hole_ids or sec in PartSpec.EDGE_IDS):
+                    if sec == sel:
+                        st.info("Same hole twice — pair it with another "
+                                "hole or an edge.")
+                    else:
+                        cx = spec.dim_current(sel, sec, "x")
+                        cy = spec.dim_current(sel, sec, "y")
+                        st.markdown(f"**Reference B: {sec}** — "
+                                    f"ΔX {cx} mm · ΔY {cy} mm")
+                        for ax in ("x", "y"):
+                            cur = spec.dim_current(sel, sec, ax)
+                            key = f"dim_{sel}_{sec}_{ax}"
+                            nv = st.number_input(
+                                f"{sel}↔{sec} {ax.upper()} (mm)",
+                                0.0, 2000.0, float(cur or 0.0), 0.1, key=key)
+                            if st.button(f"Set {ax.upper()}", key=key + "_go"):
+                                err = spec.apply_dim(sel, sec, ax, float(nv))
+                                if err:
+                                    st.error(err)
+                                else:
+                                    save(spec)
+                                    st.rerun()
+                elif sec:
+                    st.caption(f"Ignoring reference {sec} (not a hole/edge).")
+                    if st.button("Clear second reference"):
+                        ss.second = None; st.rerun()
+            elif sel:
+                st.caption(f"Selected {sel} — click a hole marker to dimension.")
+                if st.button("Clear selection"):
+                    ss.selected, ss.second = None, None; st.rerun()
+            # ----- stored constraints (survive rebuilds) -----
+            if spec.dims:
+                st.markdown("**Stored dimensions**")
+                for dc in spec.dims:
+                    cur = spec.dim_current(dc.a, dc.b, dc.axis)
+                    flag = f" ⚠ {dc.flagged}" if dc.flagged else ""
+                    st.caption(f"{dc.a}↔{dc.b} {dc.axis.upper()} = "
+                               f"{dc.value_mm:.1f} mm (now {cur}){flag}")
+                if st.button("Re-apply all dimensions"):
+                    flagged = spec.reapply_dims()
+                    save(spec)
+                    if flagged:
+                        st.warning("Flagged: " + ", ".join(flagged))
+                    st.rerun()
             d1, d2, d3 = st.columns(3)
             d1.metric("Width", f"{spec.width_mm:.1f} mm")
             d2.metric("Height", f"{spec.height_mm:.1f} mm")
