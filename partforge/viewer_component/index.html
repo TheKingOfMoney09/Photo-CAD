@@ -36,7 +36,10 @@ function ready() {
 let renderer, scene, camera, controls, markers = [], currentKey = "";
 
 function build(args) {
-  const key = args.stl_b64.slice(0, 64) + "|" + args.selected + "|" + args.markers.length;
+  const key = args.stl_b64.slice(0, 64) + "|" + args.selected + "|" + (args.second || "") + "|" +
+    args.markers.length + "|" + (args.dims || []).map(d => d.a + d.b + d.axis + d.value_mm).join(",");
+  if (key === currentKey && renderer) return;  // same model: skip rebuild, kills flicker
+  currentKey = key;
   const app = document.getElementById('app');
   if (renderer) { app.querySelectorAll('canvas').forEach(c => c.remove()); markers = []; }
   scene = new THREE.Scene();
@@ -136,9 +139,14 @@ function build(args) {
     label(d.label || (d.value_mm + 'mm'), mid);
   }
   document.getElementById('sel').textContent = args.selected ? ("selected: " + args.selected) : "";
-  camera.position.set(cx, cy - size * 1.15, size * 0.95);
-  controls.target.set(cx, cy, 0);
-  controls.update();
+  // keep the user's camera: only frame on first build for this geometry
+  const frameKey = args.stl_b64.slice(0, 64);
+  if (frameKey !== build._framed) {
+    build._framed = frameKey;
+    camera.position.set(cx, cy - size * 1.15, size * 0.95);
+    controls.target.set(cx, cy, 0);
+    controls.update();
+  }
 
   const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
   // click marker = select; shift-click marker = second reference;
