@@ -31,6 +31,22 @@ class Slot(BaseModel):
     confidence: float = 1.0
 
 
+class DimConstraint(BaseModel):
+    """A hole↔edge or hole↔hole X/Y dimension, stored in the shape IR.
+
+    a is always a hole id. b is a hole id or an edge id
+    (edge_left/edge_right/edge_bottom/edge_top = outline bbox sides).
+    axis is "x" or "y". value_mm is the target distance. flagged is set
+    when the constraint could not be applied on a rebuild.
+    """
+    type: Literal["dim_xy"] = "dim_xy"
+    a: str
+    b: str
+    axis: Literal["x", "y"] = "x"
+    value_mm: float = 0.0
+    flagged: str = ""
+
+
 class Bend(BaseModel):
     """Detected bend state. Set ONLY by partforge/bends.py, never by UI."""
     position_mm: float = 0.0  # bend line position along the part, mm
@@ -65,6 +81,7 @@ class PartSpec(BaseModel):
     holes: list[Hole] = Field(default_factory=list)
     slots: list[Slot] = Field(default_factory=list)
     bend: Optional[Bend] = None
+    dims: list[DimConstraint] = Field(default_factory=list)  # dimension constraints
     source: str = "measured"
     offset_mm: list[float] = Field(default_factory=lambda: [0.0, 0.0])  # bbox min in photo mm coords
 
@@ -200,7 +217,134 @@ class PartSpec(BaseModel):
                  f"{len(self.holes)} holes", f"{len(self.slots)} slots"]
         if self.type == "bracket" and self.bend is not None:
             parts.append(f"bend {self.bend.angle_deg:.0f}° at {self.bend.position_mm:.1f}")
+        if self.dims:
+            parts.append(f"{len(self.dims)} dims")
         return ", ".join(parts)
+
+    # -- dimension constraints (hole↔edge, hole↔hole, X/Y) --------------------
+    EDGE_IDS = ("edge_left", "edge_right", "edge_bottom", "edge_top")
+
+    def _hole(self, hid: str) -> Optional[Hole]:
+        for h in self.holes:
+            if h.id == hid:
+                return h
+        return None
+
+    def _bbox(self):
+        xs = [p[0] for p in self.outline_mm]
+        ys = [p[1] for p in self.outline_mm]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    def _edge_pos(self, edge: str, axis: str) -> Optional[float]:
+        """Outline-bbox side position along axis. For non-axis outline
+        segments this is the bbox projection — callers label it as such."""
+        if not self.outline_mm or edge not in self.EDGE_IDS:
+            return None
+        minx, miny, maxx, maxy = self._bbox()
+        if axis == "x":
+            return {"edge_left": minx, "edge_right": maxx}.get(edge)
+        return {"edge_bottom": miny, "edge_top": maxy}.get(edge)
+
+    def dim_current(self, a: str, b: str, axis: str) -> Optional[float]:
+        """Current X/Y distance between references (hole centre to hole
+        centre, or hole centre to bbox-projected edge)."""
+        ha = self._hole(a)
+        if ha is None:
+            return None
+        pa = ha.x if axis == "x" else ha.y
+        hb = self._hole(b)
+        if hb is not None:
+            pb = hb.x if axis == "x" else hb.y
+            return round(abs(pa - pb), 2)
+        pe = self._edge_pos(b, axis)
+        if pe is None:
+            return None
+        return round(abs(pa - pe), 2)
+
+    def _hole_inside(self, x: float, y: float, d: float,
+                     ignore_id: str = "") -> str:
+        """Return "" if a hole at (x,y,d) is valid, else a reason."""
+        if not self.outline_mm:
+            return "no outline"
+        minx, miny, maxx, maxy = self._bbox()
+        if not (minx + d / 2 <= x <= maxx - d / 2 and
+                miny + d / 2 <= y <= maxy - d / 2):
+            return "hole would leave the outline"
+        for h in self.holes:
+            if h.id == ignore_id:
+                continue
+            if math.hypot(x - h.x, y - h.y) < (d + h.d) / 2 + 0.2:
+                return f"hole would overlap {h.id}"
+        for s in self.slots:
+            if math.hypot(x - s.cx, y - s.cy) < d / 2 + min(s.length, s.width) / 2:
+                return f"hole would overlap {s.id}"
+        return ""
+
+    def apply_dim(self, a: str, b: str, axis: str, value_mm: float) -> str:
+        """Set dimension a↔b along axis to value_mm. Moves the SECOND hole
+        (b) for hole↔hole, or the hole (a) for hole↔edge; edges never move.
+        Returns "" on success or "Invalid: <reason>" (old value kept)."""
+        ha = self._hole(a)
+        if ha is None:
+            return f"Invalid: hole {a} not found"
+        hb = self._hole(b)
+        if hb is not None:
+            # hole↔hole: move b, keep a fixed
+            cur = (hb.x if axis == "x" else hb.y) - \
+                (ha.x if axis == "x" else ha.y)
+            delta = value_mm - abs(cur)
+            sgn = 1.0 if cur >= 0 else -1.0
+            nx = hb.x + (delta * sgn if axis == "x" else 0.0)
+            ny = hb.y + (delta * sgn if axis == "y" else 0.0)
+            bad = self._hole_inside(nx, ny, hb.d, ignore_id=hb.id)
+            if bad:
+                return f"Invalid: {bad}"
+            if axis == "x":
+                hb.x = round(nx, 2)
+            else:
+                hb.y = round(ny, 2)
+            hb.confidence = 1.0
+        else:
+            pe = self._edge_pos(b, axis)
+            if pe is None:
+                return f"Invalid: reference {b} not found"
+            # hole↔edge: move a so |a - edge| == value, same side as now
+            pa = ha.x if axis == "x" else ha.y
+            sgn = 1.0 if pa >= pe else -1.0
+            npos = pe + sgn * value_mm
+            nx = npos if axis == "x" else ha.x
+            ny = npos if axis == "y" else ha.y
+            bad = self._hole_inside(nx, ny, ha.d, ignore_id=ha.id)
+            if bad:
+                return f"Invalid: {bad}"
+            if axis == "x":
+                ha.x = round(nx, 2)
+            else:
+                ha.y = round(ny, 2)
+            ha.confidence = 1.0
+        # store (or update) the constraint
+        for dc in self.dims:
+            if dc.a == a and dc.b == b and dc.axis == axis:
+                dc.value_mm = round(value_mm, 2)
+                dc.flagged = ""
+                break
+        else:
+            self.dims.append(DimConstraint(a=a, b=b, axis=axis,
+                                           value_mm=round(value_mm, 2)))
+        return ""
+
+    def reapply_dims(self) -> list[str]:
+        """Reapply all stored constraints (rebuild / re-run survival).
+        Returns ids of flagged constraints that could not be applied."""
+        flagged = []
+        for dc in self.dims:
+            err = self.apply_dim(dc.a, dc.b, dc.axis, dc.value_mm)
+            if err:
+                dc.flagged = err.replace("Invalid: ", "")
+                flagged.append(f"{dc.a}↔{dc.b}.{dc.axis}")
+            else:
+                dc.flagged = ""
+        return flagged
 
 
 def rectangle_spec(w: float, h: float, thickness: Optional[float] = 3.0) -> PartSpec:
