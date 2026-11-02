@@ -361,26 +361,31 @@ with tab_review:
             st.warning(f"3D viewer unavailable ({e.__class__.__name__}). "
                        "Use the dimension diagram + panel on the right.")
         if isinstance(clicked, dict) and clicked.get("escape"):
-            ss.selected, ss.second = None, None
-            st.rerun()
+            if ss.selected is not None or ss.second is not None:
+                ss.selected, ss.second = None, None
+                st.rerun()
         elif isinstance(clicked, dict) and clicked.get("click"):
             cid, shift = clicked["click"], clicked.get("shift", False)
+            new_sel, new_sec = ss.selected, ss.get("second")
             if not shift:
                 # plain click: new primary selection (clears second unless
                 # clicking the same hole twice, which starts a self-pair)
                 if cid == ss.selected and cid not in (None, "") and \
                         cid.startswith("H"):
-                    ss.second = cid
+                    new_sec = cid
                 else:
-                    ss.selected, ss.second = cid, None
+                    new_sel, new_sec = cid, None
             else:
                 # shift-click / edge click: second reference
                 if cid and cid != ss.selected:
                     if ss.selected:
-                        ss.second = cid
+                        new_sec = cid
                     else:
-                        ss.selected = cid
-            st.rerun()
+                        new_sel = cid
+            if (new_sel, new_sec) != (ss.selected, ss.get("second")):
+                ss.selected, ss.second = new_sel, new_sec
+                st.rerun()
+            # unchanged selection: no rerun, no flash
         elif isinstance(clicked, str) and clicked != (ss.selected or ""):
             # legacy plain-id payload: treat as primary selection
             ss.selected, ss.second = clicked, None
