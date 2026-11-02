@@ -150,8 +150,15 @@ function build(args) {
 
   const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
   // click marker = select; shift-click marker = second reference;
-  // click empty space near an outline bbox side = edge reference
+  // click empty space near an outline bbox side = edge reference.
+  // OrbitControls also uses click-drag; only treat it as a pick when the
+  // pointer barely moved (a real click, not a rotate).
+  let downX = 0, downY = 0;
+  renderer.domElement.addEventListener('pointerdown', (e) => {
+    downX = e.clientX; downY = e.clientY;
+  });
   renderer.domElement.addEventListener('click', (e) => {
+    if (Math.hypot(e.clientX - downX, e.clientY - downY) > 6) return;
     const r = renderer.domElement.getBoundingClientRect();
     mouse.x = ((e.clientX - r.left) / r.width) * 2 - 1;
     mouse.y = -((e.clientY - r.top) / r.height) * 2 + 1;
