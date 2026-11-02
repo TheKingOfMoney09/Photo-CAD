@@ -33,23 +33,43 @@ function ready() {
   window.parent.postMessage({isStreamlitMessage: true, type: "streamlit:setFrameHeight", height: 460}, "*");
 }
 
-let renderer, scene, camera, controls, markers = [], currentKey = "";
+let renderer, scene, camera, controls, markers = [], currentKey = "", lastArgs = null;
 
 function build(args) {
+  lastArgs = args;
+
+function build(args) {
+  lastArgs = args;
   const key = args.stl_b64.slice(0, 64) + "|" + args.selected + "|" + (args.second || "") + "|" +
     args.markers.length + "|" + (args.dims || []).map(d => d.a + d.b + d.axis + d.value_mm).join(",");
   if (key === currentKey && renderer) return;  // same model: skip rebuild, kills flicker
+  const firstBuild = !renderer;
   currentKey = key;
   const app = document.getElementById('app');
-  if (renderer) { app.querySelectorAll('canvas').forEach(c => c.remove()); markers = []; }
+  // reuse renderer/camera/controls across rebuilds: only the scene contents
+  // change. Recreating the WebGL context is what blanks the view.
+  if (!renderer) {
+    renderer = new THREE.WebGLRenderer({antialias: true});
+    renderer.setSize(app.clientWidth, 460);
+    app.appendChild(renderer.domElement);
+    camera = new THREE.PerspectiveCamera(45, app.clientWidth / 460, 0.1, 5000);
+    camera.up.set(0, 0, 1);
+    controls = new OrbitControls(camera, renderer.domElement);
+    renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+    bindPickHandlers();
+  }
+  if (scene) {
+    scene.traverse(o => {
+      if (o.geometry) o.geometry.dispose();
+      if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => {
+        if (m.map) m.map.dispose();
+        m.dispose();
+      });
+    });
+  }
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x111418);
-  camera = new THREE.PerspectiveCamera(45, app.clientWidth / 460, 0.1, 5000);
-  camera.up.set(0, 0, 1);
-  renderer = new THREE.WebGLRenderer({antialias: true});
-  renderer.setSize(app.clientWidth, 460);
-  app.appendChild(renderer.domElement);
-  controls = new OrbitControls(camera, renderer.domElement);
+  markers = [];
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.75));
   const d1 = new THREE.DirectionalLight(0xffffff, 1.6); d1.position.set(120, -80, 200); scene.add(d1);
@@ -148,6 +168,12 @@ function build(args) {
     controls.update();
   }
 
+  // pick handlers bound once (renderer/camera persist across rebuilds)
+  renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+  currentKey = key;
+}
+
+function bindPickHandlers() {
   const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
   // click marker = select; shift-click marker = second reference;
   // click empty space near an outline bbox side = edge reference.
@@ -169,7 +195,7 @@ function build(args) {
     const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
     const pt = new THREE.Vector3();
     if (!ray.ray.intersectPlane(plane, pt)) return;
-    const ol = args.outline || [];
+    const ol = lastArgs.outline || [];
     if (!ol.length) return;
     const xs = ol.map(p => p[0]), ys = ol.map(p => p[1]);
     const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
@@ -182,8 +208,6 @@ function build(args) {
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') sendValue({escape: true});
   });
-  renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
-  currentKey = key;
 }
 
 window.addEventListener('message', (e) => {
