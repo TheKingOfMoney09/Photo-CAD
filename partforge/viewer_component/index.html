@@ -37,9 +37,6 @@ let renderer, scene, camera, controls, markers = [], currentKey = "", lastArgs =
 
 function build(args) {
   lastArgs = args;
-
-function build(args) {
-  lastArgs = args;
   const key = args.stl_b64.slice(0, 64) + "|" + args.selected + "|" + (args.second || "") + "|" +
     args.markers.length + "|" + (args.dims || []).map(d => d.a + d.b + d.axis + d.value_mm).join(",");
   if (key === currentKey && renderer) return;  // same model: skip rebuild, kills flicker
